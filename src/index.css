@@ -1,0 +1,47 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-bg-base: var(--bg-color);
+  --color-fg-base: var(--fg-color);
+  --color-panel: var(--panel-bg);
+}
+
+:root {
+  --bg-color: #E4E3E0;
+  --fg-color: #141414;
+  --panel-bg: #ffffff;
+  --shadow-color: 20, 20, 20;
+}
+
+.dark {
+  --bg-color: #0a0a0a;
+  --fg-color: #ffffff;
+  --panel-bg: #171717;
+  --shadow-color: 255, 255, 255;
+}
+
+body {
+  background-color: var(--bg-color);
+  color: var(--fg-color);
+}
+
+@keyframes enter {
+  0% { transform: translateY(-100%) scale(0.9); opacity: 0; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+@keyframes leave {
+  0% { transform: translateY(0) scale(1); opacity: 1; }
+  100% { transform: translateY(-100%) scale(0.9); opacity: 0; }
+}
+
+.animate-enter {
+  animation: enter 0.3s ease-out forwards;
+}
+
+.animate-leave {
+  animation: leave 0.3s ease-in forwards;
+}
