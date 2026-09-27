@@ -1,33 +1,16 @@
-
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useGame } from '../contexts/GameContext';
-import { Trophy, Users, Plus, LogIn } from 'lucide-react';
+import { Trophy, Plus, LogIn } from 'lucide-react';
 
 export const AuthPage: React.FC = () => {
-  const { playerName, setPlayerName, createRoom, joinRoom, error, setError, socket } = useGame();
+  const { playerName, setPlayerName, createRoom, joinRoom, error, setError, connectionStatus } = useGame();
   const [roomId, setRoomId] = useState('');
   const [mode, setMode] = useState<'initial' | 'create' | 'join'>('initial');
-  const [isConnected, setIsConnected] = useState(false);
 
-  useEffect(() => {
-    if (!socket) return;
-    setIsConnected(socket.connected);
-    
-    const onConnect = () => setIsConnected(true);
-    const onDisconnect = () => setIsConnected(false);
-
-    socket.on('connect', onConnect);
-    socket.on('disconnect', onDisconnect);
-
-    return () => {
-      socket.off('connect', onConnect);
-      socket.off('disconnect', onDisconnect);
-    };
-  }, [socket]);
+  const isConnected = connectionStatus === 'connected';
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('Create Room clicked', { playerName });
     if (!isConnected) return setError('Not connected to server. Please wait...');
     if (!playerName.trim()) return setError('Please enter your name');
     createRoom(playerName);
@@ -37,7 +20,6 @@ export const AuthPage: React.FC = () => {
     e.preventDefault();
     const cleanName = playerName.trim();
     const cleanRoomId = roomId.trim().toUpperCase();
-    console.log('Join Room clicked', { cleanName, cleanRoomId });
     
     if (!isConnected) return setError('Not connected to server. Please wait...');
     if (!cleanName) return setError('Please enter your name');
@@ -56,14 +38,26 @@ export const AuthPage: React.FC = () => {
         </div>
 
         <div className="mb-4 flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
-          <span className="text-[10px] font-mono uppercase opacity-50">
-            {isConnected ? 'Server Connected' : 'Connecting to Server...'}
+          <div 
+            className={`w-2.5 h-2.5 rounded-full ${
+              isConnected 
+                ? 'bg-green-500' 
+                : connectionStatus === 'reconnecting' 
+                ? 'bg-yellow-500 animate-ping' 
+                : 'bg-red-500 animate-pulse'
+            }`} 
+          />
+          <span className="text-[10px] font-mono uppercase opacity-75">
+            {isConnected 
+              ? 'Server Connected' 
+              : connectionStatus === 'reconnecting'
+              ? 'Reconnecting to Server...'
+              : 'Connecting to Server...'}
           </span>
         </div>
 
         {error && (
-          <div className="mb-6 p-3 bg-red-100 border border-red-400 text-red-700 text-sm font-mono uppercase italic">
+          <div className="mb-6 p-3 bg-red-100 dark:bg-red-950/50 border border-red-400 dark:border-red-800 text-red-700 dark:text-red-300 text-sm font-mono uppercase italic">
             {error}
           </div>
         )}
@@ -71,19 +65,13 @@ export const AuthPage: React.FC = () => {
         {mode === 'initial' && (
           <div className="space-y-4">
             <button 
-              onClick={() => {
-                console.log('Switching to Create mode');
-                setMode('create');
-              }}
+              onClick={() => setMode('create')}
               className="w-full py-4 bg-fg-base text-bg-base font-bold text-xl uppercase tracking-widest hover:opacity-90 transition-all flex items-center justify-center gap-2"
             >
               <Plus size={24} /> Create Room
             </button>
             <button 
-              onClick={() => {
-                console.log('Switching to Join mode');
-                setMode('join');
-              }}
+              onClick={() => setMode('join')}
               className="w-full py-4 border-2 border-fg-base text-fg-base font-bold text-xl uppercase tracking-widest hover:bg-fg-base hover:text-bg-base transition-all flex items-center justify-center gap-2"
             >
               <LogIn size={24} /> Join Room
@@ -100,6 +88,7 @@ export const AuthPage: React.FC = () => {
                 value={playerName}
                 onChange={(e) => setPlayerName(e.target.value)}
                 placeholder="ENTER NAME..."
+                maxLength={30}
                 className="w-full p-4 border-2 border-fg-base font-mono text-lg focus:outline-none focus:bg-yellow-50 dark:focus:bg-yellow-900 bg-panel text-fg-base"
                 autoFocus
               />
@@ -111,9 +100,10 @@ export const AuthPage: React.FC = () => {
                 <input 
                   type="text"
                   value={roomId}
-                  onChange={(e) => setRoomId(e.target.value)}
+                  onChange={(e) => setRoomId(e.target.value.toUpperCase())}
                   placeholder="ROOM CODE..."
-                  className="w-full p-4 border-2 border-fg-base font-mono text-lg focus:outline-none focus:bg-yellow-50 dark:focus:bg-yellow-900 bg-panel text-fg-base"
+                  maxLength={10}
+                  className="w-full p-4 border-2 border-fg-base font-mono text-lg focus:outline-none focus:bg-yellow-50 dark:focus:bg-yellow-900 bg-panel text-fg-base uppercase"
                 />
               </div>
             )}

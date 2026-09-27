@@ -1,8 +1,8 @@
-
 export type GameStatus = 'waiting' | 'playing' | 'finished';
 
 export interface Player {
-  id: string;
+  id: string; // Public persistent player ID
+  socketId: string | null; // Current active Socket ID (null if temporarily offline)
   name: string;
   isHost: boolean;
   isBot: boolean;
@@ -10,6 +10,8 @@ export interface Player {
   marked: boolean[][];
   completedLines: number;
   score: number;
+  connected: boolean;
+  disconnectedAt?: number;
 }
 
 export interface ChatMessage {
@@ -29,6 +31,14 @@ export interface GameState {
   currentRound: number;
   targetRounds: number;
   overallWinner: Player | null;
+  lastActivity: number;
+}
+
+export interface SessionInitPayload {
+  sessionId: string;
+  playerId: string;
+  reconnectToken: string; // Secret authentication token for reconnects
+  roomId?: string;
 }
 
 export interface ServerToClientEvents {
@@ -36,11 +46,14 @@ export interface ServerToClientEvents {
   'game-state-update': (state: GameState) => void;
   'chat-message': (message: ChatMessage) => void;
   'error': (message: string) => void;
+  'session-init': (data: SessionInitPayload) => void;
+  'pong': (timestamp: number) => void;
 }
 
 export interface ClientToServerEvents {
-  'create-room': (name: string) => void;
-  'join-room': (roomId: string, name: string) => void;
+  'create-room': (name: string, playerId?: string, reconnectToken?: string) => void;
+  'join-room': (roomId: string, name: string, playerId?: string, reconnectToken?: string) => void;
+  'reconnect-room': (roomId: string, playerId: string, reconnectToken: string) => void;
   'start-game': (roomId: string) => void;
   'set-rounds': (roomId: string, rounds: number) => void;
   'draw-number': (roomId: string) => void;
@@ -50,4 +63,5 @@ export interface ClientToServerEvents {
   'add-bot': (roomId: string) => void;
   'remove-player': (roomId: string, playerId: string) => void;
   'leave-room': (roomId: string) => void;
+  'ping': () => void;
 }

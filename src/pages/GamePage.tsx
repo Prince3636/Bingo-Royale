@@ -6,7 +6,7 @@ import { Send, Trophy, MessageSquare, Hash, ChevronRight, LogOut } from 'lucide-
 import toast from 'react-hot-toast';
 
 export const GamePage: React.FC = () => {
-  const { gameState, messages, sendMessage, drawNumber, markNumber, socket, leaveRoom, showNotification } = useGame();
+  const { gameState, messages, sendMessage, drawNumber, markNumber, socket, playerId, leaveRoom, showNotification } = useGame();
   const [chatText, setChatText] = useState('');
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [lastReadMessageCount, setLastReadMessageCount] = useState(0);
@@ -33,8 +33,8 @@ export const GamePage: React.FC = () => {
 
   if (!gameState) return null;
 
-  const myPlayer = gameState.players.find(p => p.id === socket?.id);
-  const isMyTurn = gameState.currentTurn === socket?.id;
+  const myPlayer = gameState.players.find(p => p.id === playerId || (socket?.id && p.socketId === socket.id));
+  const isMyTurn = !!(myPlayer && gameState.currentTurn === myPlayer.id);
   const currentPlayer = gameState.players.find(p => p.id === gameState.currentTurn);
 
   const handleSend = (e: React.FormEvent) => {
@@ -94,13 +94,16 @@ export const GamePage: React.FC = () => {
                         {p.name[0].toUpperCase()}
                       </div>
                       <div className="flex flex-col">
-                        <span className={`text-[10px] sm:text-sm font-bold uppercase truncate max-w-[60px] sm:max-w-[80px] ${p.id === socket?.id ? 'underline' : ''}`}>{p.name}</span>
-                        <span className="text-[8px] font-mono opacity-50">{p.isBot ? 'BOT' : 'PLAYER'}</span>
+                        <span className={`text-[10px] sm:text-sm font-bold uppercase truncate max-w-[60px] sm:max-w-[80px] ${p.id === myPlayer?.id ? 'underline text-yellow-600 dark:text-yellow-400' : ''}`}>{p.name}</span>
+                        <span className="text-[8px] font-mono opacity-50 flex items-center gap-1">
+                          {p.isBot ? 'BOT' : 'PLAYER'}
+                          {!p.connected && !p.isBot && <span className="text-red-500 font-bold">[OFFLINE]</span>}
+                        </span>
                       </div>
                     </div>
                     <div className="flex items-center gap-1 sm:gap-2">
                       <div className="flex flex-col items-end">
-                        {p.id === socket?.id && (
+                        {p.id === myPlayer?.id && (
                           <div className="flex gap-0.5 sm:gap-1 mb-0.5 sm:mb-1">
                             {['B', 'I', 'N', 'G', 'O'].map((letter, i) => {
                               const isLit = p.completedLines > i;

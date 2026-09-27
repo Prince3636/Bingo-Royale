@@ -7,20 +7,20 @@ import { generateBingoBoard } from '../utils/bingo';
 import toast from 'react-hot-toast';
 
 export const LobbyPage: React.FC = () => {
-  const { gameState, startGame, addBot, removePlayer, leaveRoom, socket, setBoard, setRounds, showNotification } = useGame();
+  const { gameState, startGame, addBot, removePlayer, leaveRoom, socket, playerId, setBoard, setRounds, showNotification } = useGame();
   const [localBoard, setLocalBoard] = useState<number[][]>(
     Array(5).fill(null).map(() => Array(5).fill(0))
   );
 
-  const myPlayer = gameState?.players.find(p => p.id === socket?.id);
+  const myPlayer = gameState?.players.find(p => p.id === playerId || (socket?.id && p.socketId === socket.id));
 
   useEffect(() => {
-    showNotification('Welcome!', `You have joined room ${gameState.roomId}. Fill your board to start!`);
+    showNotification('Welcome!', `You have joined room ${gameState?.roomId}. Fill your board to start!`);
   }, []);
 
   if (!gameState) return null;
 
-  const isHost = gameState.players.find(p => p.isHost)?.id === socket?.id;
+  const isHost = gameState.players.find(p => p.isHost)?.id === myPlayer?.id;
 
   const handleCellClick = (r: number, c: number) => {
     const currentVal = localBoard[r][c];
@@ -141,7 +141,10 @@ export const LobbyPage: React.FC = () => {
                       {player.name[0].toUpperCase()}
                     </div>
                     <span className="font-bold uppercase tracking-tight">
-                      {player.name} {player.id === socket?.id && '(YOU)'}
+                      {player.name} {player.id === myPlayer?.id && '(YOU)'}
+                      {!player.connected && !player.isBot && (
+                        <span className="ml-2 text-[9px] font-mono text-red-500 uppercase">(Disconnected)</span>
+                      )}
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
