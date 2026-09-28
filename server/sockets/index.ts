@@ -110,6 +110,31 @@ export const setupSocketHandlers = async (
       });
     });
 
+    socket.on('game:start', (roomId, callback) => {
+      safeHandle('game:start', async () => {
+        if (!actionRateLimiter.isAllowed(socket.id)) {
+          callback?.({ success: false, error: 'Rate limit exceeded' });
+          return;
+        }
+        await roomManager.startGame(socket, roomId, callback);
+      });
+    });
+
+    // Player Set Ready (Server Authoritative)
+    socket.on('player:set-ready', (payload, callback) => {
+      safeHandle('player:set-ready', async () => {
+        if (!actionRateLimiter.isAllowed(socket.id)) {
+          callback?.({ success: false, error: 'Rate limit exceeded' });
+          return;
+        }
+        if (!payload || typeof payload.roomId !== 'string' || typeof payload.ready !== 'boolean') {
+          callback?.({ success: false, error: 'Invalid payload' });
+          return;
+        }
+        await roomManager.setPlayerReady(socket, payload.roomId, payload.ready, callback);
+      });
+    });
+
     // Set Rounds
     socket.on('set-rounds', (roomId, rounds) => {
       safeHandle('set-rounds', async () => {
@@ -144,7 +169,17 @@ export const setupSocketHandlers = async (
       });
     });
 
-    // Remove Player
+    socket.on('room:add-bot', (roomId, callback) => {
+      safeHandle('room:add-bot', async () => {
+        if (!actionRateLimiter.isAllowed(socket.id)) {
+          callback?.({ success: false, error: 'Rate limit exceeded' });
+          return;
+        }
+        await roomManager.addBot(socket, roomId, callback);
+      });
+    });
+
+    // Remove / Kick Player
     socket.on('remove-player', (roomId, playerId) => {
       safeHandle('remove-player', async () => {
         if (!actionRateLimiter.isAllowed(socket.id)) return;
@@ -152,10 +187,32 @@ export const setupSocketHandlers = async (
       });
     });
 
+    socket.on('room:kick-player', (payload, callback) => {
+      safeHandle('room:kick-player', async () => {
+        if (!actionRateLimiter.isAllowed(socket.id)) {
+          callback?.({ success: false, error: 'Rate limit exceeded' });
+          return;
+        }
+        if (!payload || typeof payload.roomId !== 'string' || typeof payload.targetPlayerId !== 'string') {
+          callback?.({ success: false, error: 'Invalid payload' });
+          return;
+        }
+        await roomManager.kickPlayer(socket, payload.roomId, payload.targetPlayerId, callback);
+      });
+    });
+
     // Leave Room
     socket.on('leave-room', (roomId) => {
       safeHandle('leave-room', async () => {
         await roomManager.leaveRoom(socket, roomId);
+      });
+    });
+
+    // Reset Room (New match / clear old game records)
+    socket.on('reset-room', (roomId) => {
+      safeHandle('reset-room', async () => {
+        if (!actionRateLimiter.isAllowed(socket.id)) return;
+        await roomManager.resetRoom(socket, roomId);
       });
     });
 

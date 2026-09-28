@@ -22,8 +22,10 @@ export const config = {
   // Redis URL for horizontal multi-instance scaling
   REDIS_URL: process.env.REDIS_URL?.trim() || '',
   
-  // Scalability limits
+  // Scalability and gameplay limits
+  MIN_PLAYERS_TO_START: parseInt(process.env.MIN_PLAYERS_TO_START || '2', 10),
   MAX_PLAYERS_PER_ROOM: parseInt(process.env.MAX_PLAYERS_PER_ROOM || '5', 10),
+  TURN_TIME_LIMIT_SECONDS: parseInt(process.env.TURN_TIME_LIMIT_SECONDS || '15', 10),
   MAX_ACTIVE_ROOMS: parseInt(process.env.MAX_ACTIVE_ROOMS || '1000', 10),
   ROOM_TTL_MS: parseInt(process.env.ROOM_TTL_MS || '7200000', 10), // 2 hours
   INACTIVE_ROOM_TIMEOUT_MS: parseInt(process.env.INACTIVE_ROOM_TIMEOUT_MS || '1800000', 10), // 30 mins

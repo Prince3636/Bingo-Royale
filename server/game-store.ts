@@ -45,20 +45,24 @@ export class MemoryGameStateStore implements IGameStateStore {
   public async getRoomCount(): Promise<number> {
     const now = Date.now();
     let count = 0;
+    const expired: string[] = [];
     for (const [id, entry] of this.rooms.entries()) {
       if (now <= entry.expiresAt) count++;
-      else this.rooms.delete(id);
+      else expired.push(id);
     }
+    for (const id of expired) this.rooms.delete(id);
     return count;
   }
 
   public async getAllRoomIds(): Promise<string[]> {
     const now = Date.now();
     const ids: string[] = [];
+    const expired: string[] = [];
     for (const [id, entry] of this.rooms.entries()) {
       if (now <= entry.expiresAt) ids.push(id);
-      else this.rooms.delete(id);
+      else expired.push(id);
     }
+    for (const id of expired) this.rooms.delete(id);
     return ids;
   }
 

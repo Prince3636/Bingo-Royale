@@ -4,6 +4,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import { io as ClientIO } from 'socket.io-client';
 import { RoomManager } from '../server/room-manager';
 import { MemoryGameStateStore } from '../server/game-store';
+import { generateBingoBoard } from '../src/utils/bingo';
 import { ClientToServerEvents, ServerToClientEvents } from '../src/types/game';
 
 async function runMultiInstanceTest() {
@@ -53,6 +54,7 @@ async function runMultiInstanceTest() {
         });
       });
     });
+    s1.on('set-board', (rId, b) => manager1.setBoard(s1, rId, b));
     s1.on('leave-room', (rId) => manager1.leaveRoom(s1, rId));
     s1.on('disconnect', () => manager1.handleSocketDisconnect(s1));
   });
@@ -63,6 +65,8 @@ async function runMultiInstanceTest() {
         if (room) io1.to(rId).emit('room-update', room);
       });
     });
+    s2.on('set-board', (rId, b) => manager2.setBoard(s2, rId, b));
+    s2.on('player:set-ready', (payload, cb) => manager2.setPlayerReady(s2, payload.roomId, payload.ready, cb));
     s2.on('reconnect-room', (rId, pId, token) => {
       manager2.reconnectPlayer(s2, rId, pId, token).then(room => {
         if (room) io1.to(rId).emit('room-update', room);
@@ -123,6 +127,16 @@ async function runMultiInstanceTest() {
       clientB.emit('join-room', roomId, 'Bob');
     });
     console.log('✓ Client B on Backend 2 successfully joined Backend 1 room!');
+
+    // Set boards and mark Client B ready (authoritative start requirements)
+    const boardA = generateBingoBoard();
+    const boardB = generateBingoBoard();
+    clientA.emit('set-board', roomId, boardA);
+    clientB.emit('set-board', roomId, boardB);
+    await new Promise(r => setTimeout(r, 200));
+
+    clientB.emit('player:set-ready', { roomId, ready: true });
+    await new Promise(r => setTimeout(r, 200));
 
     // 3. Client A starts game on Backend 1 -> Client B on Backend 2 receives game state
     console.log('\n[3/4] Client A starts game on Backend 1 -> verifying sync on Backend 2...');

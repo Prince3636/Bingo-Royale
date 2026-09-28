@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { Server, Socket } from 'socket.io';
-import { GameState, Player, ChatMessage, ClientToServerEvents, ServerToClientEvents } from '../src/types/game';
+import { GameState, Player, ChatMessage, ClientToServerEvents, ServerToClientEvents, AckCallback } from '../src/types/game';
 import { generateBingoBoard, checkBingo } from '../src/utils/bingo';
 import { IGameStateStore, MemoryGameStateStore } from './game-store';
 import { config } from './config';
@@ -13,6 +13,7 @@ export class RoomManager {
   private disconnectTimers: Map<string, NodeJS.Timeout> = new Map();
   private botTimers: Map<string, NodeJS.Timeout> = new Map();
   private roundTimers: Map<string, NodeJS.Timeout> = new Map();
+  private turnTimers: Map<string, NodeJS.Timeout> = new Map();
   private cleanupInterval: NodeJS.Timeout;
 
   constructor(
@@ -70,6 +71,21 @@ export class RoomManager {
     return seen.size === 25;
   }
 
+  public isValidBoardStructure(board: unknown): board is number[][] {
+    if (!Array.isArray(board) || board.length !== 5) return false;
+    for (let r = 0; r < 5; r++) {
+      const row = board[r];
+      if (!Array.isArray(row) || row.length !== 5) return false;
+      for (let c = 0; c < 5; c++) {
+        const val = row[c];
+        if (typeof val !== 'number' || !Number.isInteger(val) || val < 0 || val > 25) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   public async createRoom(socket: Socket, playerName: string): Promise<GameState | null> {
     const roomCount = await this.store.getRoomCount();
     if (roomCount >= config.MAX_ACTIVE_ROOMS) {
@@ -87,7 +103,7 @@ export class RoomManager {
     const playerId = `p_${crypto.randomUUID()}`;
     const reconnectToken = this.generateSecureToken();
 
-    const hostBoard = generateBingoBoard();
+    const hostBoard = Array(5).fill(null).map(() => Array(5).fill(0));
     const marked = Array(5).fill(null).map(() => Array(5).fill(false));
     marked[2][2] = true; // Free center space
 
@@ -101,7 +117,8 @@ export class RoomManager {
       marked,
       completedLines: 0,
       score: 0,
-      connected: true
+      connected: true,
+      ready: false
     };
 
     const room: GameState = {
@@ -171,9 +188,18 @@ export class RoomManager {
       return null;
     }
 
+    // Reject duplicate player names in the same room
+    const nameTaken = room.players.some(
+      p => p.name.trim().toLowerCase() === cleanName.toLowerCase()
+    );
+    if (nameTaken) {
+      socket.emit('error', `Name "${cleanName}" is already taken in this room. Please choose a different name.`);
+      return null;
+    }
+
     const playerId = `p_${crypto.randomUUID()}`;
     const newReconnectToken = this.generateSecureToken();
-    const board = generateBingoBoard();
+    const board = Array(5).fill(null).map(() => Array(5).fill(0));
     const marked = Array(5).fill(null).map(() => Array(5).fill(false));
     marked[2][2] = true;
 
@@ -187,7 +213,8 @@ export class RoomManager {
       marked,
       completedLines: 0,
       score: 0,
-      connected: true
+      connected: true,
+      ready: false
     };
 
     room.players.push(player);
@@ -206,6 +233,7 @@ export class RoomManager {
       roomId: cleanRoomId
     });
     this.io.to(cleanRoomId).emit('room-update', room);
+    socket.to(cleanRoomId).emit('player:joined', { player: { id: playerId, name: cleanName } });
 
     logger.info('Player joined room', { roomId: cleanRoomId, playerId, name: cleanName });
     return room;
@@ -264,6 +292,7 @@ export class RoomManager {
       roomId: cleanRoomId
     });
     this.io.to(cleanRoomId).emit('room-update', room);
+    socket.to(cleanRoomId).emit('player:reconnected', { player: { id: player.id, name: player.name } });
 
     logger.info('Player reconnected successfully', { roomId: cleanRoomId, playerId, name: player.name });
     return room;
@@ -279,15 +308,88 @@ export class RoomManager {
     const player = room.players.find(p => p.id === mapping.playerId);
     if (!player || player.isBot) return;
 
-    if (!this.validateBoard(board)) {
-      socket.emit('error', 'Invalid Bingo board: Must be 5x5 containing numbers 1-25 uniquely');
+    if (!this.isValidBoardStructure(board)) {
+      socket.emit('error', 'Invalid Bingo board structure: Must be 5x5 containing integers 0-25');
       return;
     }
 
     player.board = board;
+    // Changing board after ready automatically un-readies player (Requirement 5)
+    player.ready = false;
     room.lastActivity = Date.now();
     await this.store.saveRoom(roomId, room, config.ROOM_TTL_MS);
     this.io.to(roomId).emit('room-update', room);
+  }
+
+  public async setPlayerReady(
+    socket: Socket,
+    roomId: string,
+    ready: boolean,
+    callback?: AckCallback
+  ): Promise<{ success: boolean; error?: string }> {
+    const room = await this.store.getRoom(roomId);
+    if (!room) {
+      const err = 'Room not found';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
+
+    if (room.status !== 'waiting') {
+      const err = 'Game has already started';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
+
+    const mapping = this.socketToPlayer.get(socket.id);
+    if (!mapping || mapping.roomId !== roomId) {
+      const err = 'Player not recognized in this room';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
+
+    const player = room.players.find(p => p.id === mapping.playerId);
+    if (!player || player.isBot) {
+      const err = 'Invalid player';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
+
+    if (player.isHost) {
+      const err = 'Host does not toggle ready status';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
+
+    if (!player.connected) {
+      const err = 'Player is disconnected';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
+
+    if (ready) {
+      // Validate board before becoming ready (Requirement 4)
+      if (!this.validateBoard(player.board)) {
+        const err = 'Please complete a valid Bingo board before readying up.';
+        socket.emit('error', err);
+        callback?.({ success: false, error: err });
+        return { success: false, error: err };
+      }
+    }
+
+    player.ready = Boolean(ready);
+    room.lastActivity = Date.now();
+    await this.store.saveRoom(roomId, room, config.ROOM_TTL_MS);
+    this.io.to(roomId).emit('room-update', room);
+
+    logger.info('Player ready state updated', { roomId, playerId: player.id, ready: player.ready });
+    callback?.({ success: true });
+    return { success: true };
   }
 
   public async setRounds(socket: Socket, roomId: string, rounds: unknown): Promise<void> {
@@ -308,28 +410,77 @@ export class RoomManager {
     this.io.to(roomId).emit('room-update', room);
   }
 
-  public async startGame(socket: Socket, roomId: string): Promise<void> {
+  public async startGame(
+    socket: Socket,
+    roomId: string,
+    callback?: AckCallback
+  ): Promise<{ success: boolean; error?: string }> {
     const room = await this.store.getRoom(roomId);
-    if (!room || room.status !== 'waiting') return;
+    if (!room) {
+      const err = 'Room not found';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
+
+    if (room.status !== 'waiting') {
+      const err = 'Game already started';
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
 
     const mapping = this.socketToPlayer.get(socket.id);
-    if (!mapping || mapping.roomId !== roomId) return;
+    if (!mapping || mapping.roomId !== roomId) {
+      const err = 'Player not recognized';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
 
     const player = room.players.find(p => p.id === mapping.playerId);
-    if (!player || !player.isHost) return;
-
-    if (room.players.length < 2) {
-      socket.emit('error', 'Cannot start game with fewer than 2 players');
-      return;
+    if (!player || !player.isHost) {
+      const err = 'Only the host can start the game';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
     }
 
-    // Verify all players have valid boards
-    const unreadyPlayer = room.players.find(p => !this.validateBoard(p.board));
+    if (room.players.length < config.MIN_PLAYERS_TO_START) {
+      const err = `Cannot start game with fewer than ${config.MIN_PLAYERS_TO_START} players`;
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
+
+    // Strictly enforce: ALL non-host human players must have clicked "Ready"
+    const unreadyPlayer = room.players.find(p => !p.isBot && !p.isHost && !p.ready);
     if (unreadyPlayer) {
-      socket.emit('error', `${unreadyPlayer.name} has not finished their board setup`);
-      return;
+      const err = `${unreadyPlayer.name} is not ready yet. All players must click Ready before starting.`;
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
     }
 
+    // Validate that ALL players (host, humans, bots) have complete valid boards
+    for (const p of room.players) {
+      if (!this.validateBoard(p.board)) {
+        const err = `${p.name} does not have a complete valid Bingo board`;
+        socket.emit('error', err);
+        callback?.({ success: false, error: err });
+        return { success: false, error: err };
+      }
+    }
+
+    // Validate no disconnected human players block game start
+    const disconnectedPlayer = room.players.find(p => !p.isBot && !p.connected);
+    if (disconnectedPlayer) {
+      const err = `${disconnectedPlayer.name} is offline. Please wait for them to reconnect or remove them.`;
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
+
+    // Atomic state transition
     room.status = 'playing';
     room.drawnNumbers = [];
     room.winner = null;
@@ -340,6 +491,14 @@ export class RoomManager {
     const initialPlayer = connectedPlayers[Math.floor(Math.random() * connectedPlayers.length)] || room.players[0];
     room.currentTurn = initialPlayer.id;
 
+    // Start server-authoritative turn timer (Requirement 18, 19, 20)
+    room.turnId = 1;
+    room.turnStartedAt = Date.now();
+    room.turnDeadline = room.turnStartedAt + (config.TURN_TIME_LIMIT_SECONDS * 1000);
+
+    this.clearTurnTimer(roomId);
+    this.scheduleTurnTimer(roomId, room.turnId, initialPlayer.id);
+
     await this.store.saveRoom(roomId, room, config.ROOM_TTL_MS);
     this.io.to(roomId).emit('room-update', room);
     logger.info('Game started', { roomId, currentTurn: room.currentTurn, rounds: room.targetRounds });
@@ -347,6 +506,48 @@ export class RoomManager {
     if (initialPlayer.isBot) {
       this.scheduleBotTurn(roomId);
     }
+
+    callback?.({ success: true });
+    return { success: true };
+  }
+
+  public clearTurnTimer(roomId: string): void {
+    if (this.turnTimers.has(roomId)) {
+      clearTimeout(this.turnTimers.get(roomId)!);
+      this.turnTimers.delete(roomId);
+    }
+  }
+
+  private scheduleTurnTimer(roomId: string, turnId: number, playerId: string): void {
+    this.clearTurnTimer(roomId);
+
+    const timer = setTimeout(() => {
+      this.handleTurnTimeout(roomId, turnId, playerId).catch(err => {
+        logger.error('Error handling turn timeout', { roomId, error: String(err) });
+      });
+    }, config.TURN_TIME_LIMIT_SECONDS * 1000);
+
+    this.turnTimers.set(roomId, timer);
+  }
+
+  public async handleTurnTimeout(roomId: string, turnId: number, playerId: string): Promise<void> {
+    const room = await this.store.getRoom(roomId);
+    if (!room || room.status !== 'playing' || room.winner) return;
+
+    // Atomically verify turnId and currentTurn to prevent race condition (Requirement 20)
+    if (room.turnId !== turnId || room.currentTurn !== playerId) return;
+
+    const timedOutPlayer = room.players.find(p => p.id === playerId);
+    logger.info('Turn timeout triggered', { roomId, playerId, playerName: timedOutPlayer?.name });
+
+    this.io.to(roomId).emit('game:turn-timeout', {
+      playerId,
+      name: timedOutPlayer?.name || 'Player'
+    });
+
+    await this.advanceTurn(roomId, room);
+    await this.store.saveRoom(roomId, room, config.ROOM_TTL_MS);
+    this.io.to(roomId).emit('room-update', room);
   }
 
   public async markNumber(socket: Socket, roomId: string, r: unknown, c: unknown): Promise<void> {
@@ -367,7 +568,16 @@ export class RoomManager {
     const isMyTurn = room.currentTurn === player.id;
 
     if (isMyTurn) {
+      // Validate turn deadline with small network jitter tolerance (Requirement 20)
+      if (room.turnDeadline && Date.now() > room.turnDeadline + 500) {
+        logger.warn('Move rejected: turn timer expired', { roomId, playerId: player.id });
+        return;
+      }
+
       if (!room.drawnNumbers.includes(num)) {
+        // Clear turn timer as valid move has been executed
+        this.clearTurnTimer(roomId);
+
         // Calling new number
         room.drawnNumbers.push(num);
         room.lastActivity = Date.now();
@@ -382,10 +592,20 @@ export class RoomManager {
             }
           }
           p.completedLines = checkBingo(p.marked);
-          if (p.completedLines >= 5 && !room.winner) {
-            this.handleRoundWinner(roomId, room, p);
-          }
         });
+
+        // Check winner: current-turn player gets priority, then others
+        if (player.completedLines >= 5 && !room.winner) {
+          this.handleRoundWinner(roomId, room, player);
+        }
+        if (!room.winner) {
+          for (const p of room.players) {
+            if (p.id !== player.id && p.completedLines >= 5) {
+              this.handleRoundWinner(roomId, room, p);
+              break;
+            }
+          }
+        }
 
         if (!room.winner && room.status === 'playing') {
           await this.advanceTurn(roomId, room);
@@ -420,6 +640,8 @@ export class RoomManager {
   }
 
   private async advanceTurn(roomId: string, room: GameState): Promise<void> {
+    this.clearTurnTimer(roomId);
+
     if (room.status !== 'playing' || room.winner) return;
 
     const eligiblePlayers = room.players.filter(p => p.connected || p.isBot);
@@ -430,6 +652,11 @@ export class RoomManager {
     const nextPlayer = eligiblePlayers[nextIdx];
 
     room.currentTurn = nextPlayer.id;
+    room.turnId = (room.turnId || 0) + 1;
+    room.turnStartedAt = Date.now();
+    room.turnDeadline = room.turnStartedAt + (config.TURN_TIME_LIMIT_SECONDS * 1000);
+
+    this.scheduleTurnTimer(roomId, room.turnId, nextPlayer.id);
 
     if (nextPlayer.isBot) {
       this.scheduleBotTurn(roomId);
@@ -480,6 +707,9 @@ export class RoomManager {
     const chosenNum = bot.board[chosenCoord.r][chosenCoord.c];
 
     if (!room.drawnNumbers.includes(chosenNum)) {
+      // Clear turn timer as bot valid move executed
+      this.clearTurnTimer(roomId);
+
       room.drawnNumbers.push(chosenNum);
       room.lastActivity = Date.now();
 
@@ -492,10 +722,20 @@ export class RoomManager {
           }
         }
         p.completedLines = checkBingo(p.marked);
-        if (p.completedLines >= 5 && !room.winner) {
-          this.handleRoundWinner(roomId, room, p);
-        }
       });
+
+      // Check winner: bot (current turn) gets priority, then others
+      if (bot.completedLines >= 5 && !room.winner) {
+        this.handleRoundWinner(roomId, room, bot);
+      }
+      if (!room.winner) {
+        for (const p of room.players) {
+          if (p.id !== bot.id && p.completedLines >= 5) {
+            this.handleRoundWinner(roomId, room, p);
+            break;
+          }
+        }
+      }
     }
 
     if (!room.winner && room.status === 'playing') {
@@ -509,8 +749,10 @@ export class RoomManager {
   private handleRoundWinner(roomId: string, room: GameState, player: Player): void {
     if (room.winner) return; // Prevent race conditions
 
+    this.clearTurnTimer(roomId);
     player.score++;
-    room.winner = player;
+    // Store winner as a shallow copy to prevent stale data from later mutations
+    room.winner = { ...player };
     room.lastActivity = Date.now();
 
     if (this.botTimers.has(roomId)) {
@@ -529,7 +771,7 @@ export class RoomManager {
       this.roundTimers.set(roomId, timer);
     } else {
       const sorted = [...room.players].sort((a, b) => b.score - a.score);
-      room.overallWinner = sorted[0] || player;
+      room.overallWinner = { ...(sorted[0] || player) };
       room.status = 'finished';
       logger.info('Game finished', { roomId, overallWinner: room.overallWinner.name });
     }
@@ -554,6 +796,11 @@ export class RoomManager {
     const activePlayers = room.players.filter(p => p.connected || p.isBot);
     const nextTurnPlayer = activePlayers[Math.floor(Math.random() * activePlayers.length)] || room.players[0];
     room.currentTurn = nextTurnPlayer.id;
+    room.turnId = (room.turnId || 0) + 1;
+    room.turnStartedAt = Date.now();
+    room.turnDeadline = room.turnStartedAt + (config.TURN_TIME_LIMIT_SECONDS * 1000);
+
+    this.scheduleTurnTimer(roomId, room.turnId, nextTurnPlayer.id);
 
     await this.store.saveRoom(roomId, room, config.ROOM_TTL_MS);
     this.io.to(roomId).emit('room-update', room);
@@ -563,23 +810,52 @@ export class RoomManager {
     }
   }
 
-  public async addBot(socket: Socket, roomId: string): Promise<void> {
+  public async addBot(
+    socket: Socket,
+    roomId: string,
+    callback?: AckCallback
+  ): Promise<{ success: boolean; error?: string }> {
     const room = await this.store.getRoom(roomId);
-    if (!room || room.status !== 'waiting') return;
+    if (!room) {
+      callback?.({ success: false, error: 'Room not found' });
+      return { success: false, error: 'Room not found' };
+    }
+
+    if (room.status !== 'waiting') {
+      const err = 'Cannot add bots after game has started';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
 
     const mapping = this.socketToPlayer.get(socket.id);
-    if (!mapping || mapping.roomId !== roomId) return;
+    if (!mapping || mapping.roomId !== roomId) {
+      callback?.({ success: false, error: 'Unauthorized' });
+      return { success: false, error: 'Unauthorized' };
+    }
 
     const requester = room.players.find(p => p.id === mapping.playerId);
-    if (!requester || !requester.isHost) return;
+    if (!requester || !requester.isHost) {
+      const err = 'Only the host can add bots';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
 
     if (room.players.length >= config.MAX_PLAYERS_PER_ROOM) {
-      socket.emit('error', 'Room is full');
-      return;
+      const err = `Room is full (max ${config.MAX_PLAYERS_PER_ROOM} players)`;
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
     }
 
     const botId = `bot_${this.generateId(5)}`;
-    const botNumber = room.players.filter(p => p.isBot).length + 1;
+    // Generate unique bot name that won't collide after remove+re-add
+    const existingBotNames = new Set(room.players.filter(p => p.isBot).map(p => p.name));
+    let botNumber = 1;
+    while (existingBotNames.has(`Bot ${botNumber}`)) {
+      botNumber++;
+    }
     const botBoard = generateBingoBoard();
     const marked = Array(5).fill(null).map(() => Array(5).fill(false));
     marked[2][2] = true;
@@ -594,7 +870,8 @@ export class RoomManager {
       marked,
       completedLines: 0,
       score: 0,
-      connected: true
+      connected: true,
+      ready: true
     };
 
     room.players.push(bot);
@@ -602,35 +879,139 @@ export class RoomManager {
     await this.store.saveRoom(roomId, room, config.ROOM_TTL_MS);
     this.io.to(roomId).emit('room-update', room);
     logger.info('Bot added', { roomId, botId });
+    callback?.({ success: true });
+    return { success: true };
   }
 
-  public async removePlayer(socket: Socket, roomId: string, targetPlayerId: string): Promise<void> {
+  public async kickPlayer(
+    socket: Socket,
+    roomId: string,
+    targetPlayerId: string,
+    callback?: AckCallback
+  ): Promise<{ success: boolean; error?: string }> {
     const room = await this.store.getRoom(roomId);
-    if (!room || room.status !== 'waiting') return;
+    if (!room) {
+      callback?.({ success: false, error: 'Room not found' });
+      return { success: false, error: 'Room not found' };
+    }
+
+    if (room.status !== 'waiting') {
+      const err = 'Cannot remove players after game has started';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
 
     const mapping = this.socketToPlayer.get(socket.id);
-    if (!mapping || mapping.roomId !== roomId) return;
+    if (!mapping || mapping.roomId !== roomId) {
+      callback?.({ success: false, error: 'Unauthorized' });
+      return { success: false, error: 'Unauthorized' };
+    }
 
     const requester = room.players.find(p => p.id === mapping.playerId);
-    if (!requester || !requester.isHost) return;
+    if (!requester || !requester.isHost) {
+      const err = 'Only the host can remove players or bots';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
 
     const targetIdx = room.players.findIndex(p => p.id === targetPlayerId);
-    if (targetIdx === -1) return;
+    if (targetIdx === -1) {
+      const err = 'Target player not found in room';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
 
     const target = room.players[targetIdx];
-    if (target.isHost) return;
+    if (target.isHost) {
+      const err = 'Host cannot kick themselves';
+      socket.emit('error', err);
+      callback?.({ success: false, error: err });
+      return { success: false, error: err };
+    }
+
+    // Clean bot timers if target is a bot
+    if (target.isBot && this.botTimers.has(roomId)) {
+      clearTimeout(this.botTimers.get(roomId)!);
+      this.botTimers.delete(roomId);
+    }
+
+    // Invalidate target's reconnect token permanently (Requirement 13)
+    await this.store.deletePlayerToken(roomId, targetPlayerId);
+
+    // Notify and disconnect target socket if connected
+    if (target.socketId) {
+      const targetSocket = this.io.sockets.sockets.get(target.socketId);
+      if (targetSocket) {
+        targetSocket.emit('room:kicked', { reason: 'You have been removed from the room by the host.' });
+        targetSocket.leave(roomId);
+      }
+      this.socketToPlayer.delete(target.socketId);
+    }
+
+    const timerKey = `${roomId}:${targetPlayerId}`;
+    if (this.disconnectTimers.has(timerKey)) {
+      clearTimeout(this.disconnectTimers.get(timerKey)!);
+      this.disconnectTimers.delete(timerKey);
+    }
 
     room.players.splice(targetIdx, 1);
     room.lastActivity = Date.now();
 
-    if (target.socketId) {
-      this.socketToPlayer.delete(target.socketId);
+    await this.store.saveRoom(roomId, room, config.ROOM_TTL_MS);
+    this.io.to(roomId).emit('room-update', room);
+    logger.info('Player kicked by host', { roomId, targetPlayerId, name: target.name });
+
+    callback?.({ success: true });
+    return { success: true };
+  }
+
+  public async removePlayer(socket: Socket, roomId: string, targetPlayerId: string, callback?: AckCallback): Promise<void> {
+    await this.kickPlayer(socket, roomId, targetPlayerId, callback);
+  }
+
+  public async resetRoom(socket: Socket, roomId: string): Promise<void> {
+    const room = await this.store.getRoom(roomId);
+    if (!room) return;
+
+    const mapping = this.socketToPlayer.get(socket.id);
+    if (!mapping || mapping.roomId !== roomId) return;
+
+    const player = room.players.find(p => p.id === mapping.playerId);
+    if (!player || !player.isHost) return;
+
+    this.clearTurnTimer(roomId);
+    if (this.botTimers.has(roomId)) {
+      clearTimeout(this.botTimers.get(roomId)!);
+      this.botTimers.delete(roomId);
     }
-    await this.store.deletePlayerToken(roomId, targetPlayerId);
+    if (this.roundTimers.has(roomId)) {
+      clearTimeout(this.roundTimers.get(roomId)!);
+      this.roundTimers.delete(roomId);
+    }
+
+    room.status = 'waiting';
+    room.winner = null;
+    room.overallWinner = null;
+    room.currentRound = 1;
+    room.drawnNumbers = [];
+    room.currentTurn = player.id;
+    room.lastActivity = Date.now();
+
+    room.players.forEach(p => {
+      p.score = 0;
+      p.completedLines = 0;
+      p.board = generateBingoBoard();
+      p.marked = Array(5).fill(null).map(() => Array(5).fill(false));
+      p.marked[2][2] = true;
+      p.ready = p.isBot ? true : false;
+    });
 
     await this.store.saveRoom(roomId, room, config.ROOM_TTL_MS);
     this.io.to(roomId).emit('room-update', room);
-    logger.info('Player removed by host', { roomId, targetPlayerId });
+    logger.info('Room reset for new game, all old records cleared', { roomId });
   }
 
   public async leaveRoom(socket: Socket, roomId: string): Promise<void> {
@@ -809,6 +1190,7 @@ export class RoomManager {
   public async destroyRoom(roomId: string): Promise<void> {
     logger.info('Destroying room', { roomId });
 
+    this.clearTurnTimer(roomId);
     if (this.botTimers.has(roomId)) {
       clearTimeout(this.botTimers.get(roomId)!);
       this.botTimers.delete(roomId);
@@ -843,9 +1225,11 @@ export class RoomManager {
   public shutdown(): void {
     logger.info('RoomManager shutting down, cleaning all timers and rooms');
     clearInterval(this.cleanupInterval);
+    this.turnTimers.forEach(t => clearTimeout(t));
     this.botTimers.forEach(t => clearTimeout(t));
     this.roundTimers.forEach(t => clearTimeout(t));
     this.disconnectTimers.forEach(t => clearTimeout(t));
+    this.turnTimers.clear();
     this.botTimers.clear();
     this.roundTimers.clear();
     this.disconnectTimers.clear();

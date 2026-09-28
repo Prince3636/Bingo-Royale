@@ -19,15 +19,17 @@ interface GameContextType {
   createRoom: (name: string) => void;
   joinRoom: (roomId: string, name: string) => void;
   reconnectRoom: (roomId: string, playerId: string, token: string) => void;
-  startGame: () => void;
+  setPlayerReady: (ready: boolean) => Promise<{ success: boolean; error?: string }>;
+  startGame: () => Promise<{ success: boolean; error?: string }>;
   setRounds: (rounds: number) => void;
-  drawNumber: () => void;
   markNumber: (r: number, c: number) => void;
   setBoard: (board: number[][]) => void;
   sendMessage: (text: string) => void;
-  addBot: () => void;
+  addBot: () => Promise<{ success: boolean; error?: string }>;
+  kickPlayer: (targetPlayerId: string) => Promise<{ success: boolean; error?: string }>;
   removePlayer: (playerId: string) => void;
   leaveRoom: () => void;
+  resetRoom: () => void;
   setError: (err: string | null) => void;
   showNotification: (title: string, message: string, duration?: number) => void;
 }
@@ -140,6 +142,29 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setMessages((prev) => [...prev.slice(-99), msg]);
     });
 
+    // Authoritative single-event notifications for joined and reconnected players
+    newSocket.on('player:joined', (data) => {
+      toast.success(`${data.player.name} joined the room!`, { id: `joined-${data.player.id}` });
+    });
+
+    newSocket.on('player:reconnected', (data) => {
+      toast.success(`${data.player.name} reconnected`, { id: `reconnected-${data.player.id}` });
+    });
+
+    newSocket.on('room:kicked', (data) => {
+      toast.error(data.reason || 'You were removed from the room by the host.', { id: 'kicked-alert', duration: 6000 });
+      sessionStorage.removeItem(STORAGE_KEYS.ROOM_ID);
+      sessionStorage.removeItem(STORAGE_KEYS.PLAYER_ID);
+      sessionStorage.removeItem(STORAGE_KEYS.RECONNECT_TOKEN);
+      setPlayerId(null);
+      setGameState(null);
+      setMessages([]);
+    });
+
+    newSocket.on('game:turn-timeout', (data) => {
+      toast(`${data.name}'s turn timed out!`, { icon: '⏰', id: 'turn-timeout', duration: 2500 });
+    });
+
     newSocket.on('error', (msg) => {
       setError(msg);
       toast.error(msg, { id: 'game-error', duration: 4000 });
@@ -152,29 +177,64 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   }, [isBackendMissing]);
 
   const createRoom = (name: string) => {
+    // Reset any old session keys when creating a fresh room
+    sessionStorage.removeItem(STORAGE_KEYS.ROOM_ID);
+    sessionStorage.removeItem(STORAGE_KEYS.PLAYER_ID);
+    sessionStorage.removeItem(STORAGE_KEYS.RECONNECT_TOKEN);
     socketRef.current?.emit('create-room', name);
   };
 
   const joinRoom = (roomId: string, name: string) => {
-    const savedPlayerId = sessionStorage.getItem(STORAGE_KEYS.PLAYER_ID) || undefined;
-    const savedToken = sessionStorage.getItem(STORAGE_KEYS.RECONNECT_TOKEN) || undefined;
-    socketRef.current?.emit('join-room', roomId, name, savedPlayerId, savedToken);
+    const cleanRoomId = roomId.trim().toUpperCase();
+    const savedRoomId = sessionStorage.getItem(STORAGE_KEYS.ROOM_ID);
+    const isSameRoom = savedRoomId === cleanRoomId;
+    
+    // Only pass saved credentials if reconnecting to the same room
+    const savedPlayerId = isSameRoom ? sessionStorage.getItem(STORAGE_KEYS.PLAYER_ID) || undefined : undefined;
+    const savedToken = isSameRoom ? sessionStorage.getItem(STORAGE_KEYS.RECONNECT_TOKEN) || undefined : undefined;
+    socketRef.current?.emit('join-room', cleanRoomId, name, savedPlayerId, savedToken);
   };
 
   const reconnectRoom = (roomId: string, reconnectId: string, token: string) => {
     socketRef.current?.emit('reconnect-room', roomId, reconnectId, token);
   };
 
-  const startGame = () => {
-    if (gameState) socketRef.current?.emit('start-game', gameState.roomId);
+  const setPlayerReady = (ready: boolean): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      if (!gameState || !socketRef.current) {
+        resolve({ success: false, error: 'Not connected to room' });
+        return;
+      }
+      socketRef.current.emit('player:set-ready', { roomId: gameState.roomId, ready }, (res) => {
+        if (!res?.success) {
+          toast.error(res?.error || 'Failed to update ready status', { id: 'ready-err' });
+          resolve({ success: false, error: res?.error });
+        } else {
+          resolve({ success: true });
+        }
+      });
+    });
+  };
+
+  const startGame = (): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      if (!gameState || !socketRef.current) {
+        resolve({ success: false, error: 'Not connected' });
+        return;
+      }
+      socketRef.current.emit('game:start', gameState.roomId, (res) => {
+        if (!res?.success) {
+          toast.error(res?.error || 'Cannot start game', { id: 'start-err' });
+          resolve({ success: false, error: res?.error });
+        } else {
+          resolve({ success: true });
+        }
+      });
+    });
   };
 
   const setRounds = (rounds: number) => {
     if (gameState) socketRef.current?.emit('set-rounds', gameState.roomId, rounds);
-  };
-
-  const drawNumber = () => {
-    if (gameState) socketRef.current?.emit('draw-number', gameState.roomId);
   };
 
   const markNumber = (r: number, c: number) => {
@@ -189,21 +249,61 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (gameState) socketRef.current?.emit('send-message', gameState.roomId, text);
   };
 
-  const addBot = () => {
-    if (gameState) socketRef.current?.emit('add-bot', gameState.roomId);
+  const addBot = (): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      if (!gameState || !socketRef.current) {
+        resolve({ success: false, error: 'Not connected' });
+        return;
+      }
+      socketRef.current.emit('room:add-bot', gameState.roomId, (res) => {
+        if (!res?.success) {
+          toast.error(res?.error || 'Failed to add bot', { id: 'bot-err' });
+          resolve({ success: false, error: res?.error });
+        } else {
+          toast.success('Bot added to room! ✓', { id: 'bot-added', icon: '🤖' });
+          resolve({ success: true });
+        }
+      });
+    });
+  };
+
+  const kickPlayer = (targetPlayerId: string): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      if (!gameState || !socketRef.current) {
+        resolve({ success: false, error: 'Not connected' });
+        return;
+      }
+      socketRef.current.emit('room:kick-player', { roomId: gameState.roomId, targetPlayerId }, (res) => {
+        if (!res?.success) {
+          toast.error(res?.error || 'Failed to remove player', { id: 'kick-err' });
+          resolve({ success: false, error: res?.error });
+        } else {
+          toast.success('Player removed from room', { id: 'kick-success' });
+          resolve({ success: true });
+        }
+      });
+    });
   };
 
   const removePlayer = (targetPlayerId: string) => {
-    if (gameState) socketRef.current?.emit('remove-player', gameState.roomId, targetPlayerId);
+    kickPlayer(targetPlayerId);
   };
 
   const leaveRoom = () => {
     if (gameState) {
       socketRef.current?.emit('leave-room', gameState.roomId);
       sessionStorage.removeItem(STORAGE_KEYS.ROOM_ID);
+      sessionStorage.removeItem(STORAGE_KEYS.PLAYER_ID);
       sessionStorage.removeItem(STORAGE_KEYS.RECONNECT_TOKEN);
+      setPlayerId(null);
       setGameState(null);
       setMessages([]);
+    }
+  };
+
+  const resetRoom = () => {
+    if (gameState) {
+      socketRef.current?.emit('reset-room', gameState.roomId);
     }
   };
 
@@ -243,15 +343,17 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         createRoom,
         joinRoom,
         reconnectRoom,
+        setPlayerReady,
         startGame,
         setRounds,
-        drawNumber,
         markNumber,
         setBoard,
         sendMessage,
         addBot,
+        kickPlayer,
         removePlayer,
         leaveRoom,
+        resetRoom,
         setError,
         showNotification
       }}

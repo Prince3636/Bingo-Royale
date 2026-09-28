@@ -116,6 +116,21 @@ async function startServer() {
     }
   });
 
+  // Version and deployment metadata
+  app.get('/version', (req, res) => {
+    res.status(200).json({
+      version: '1.2.0',
+      commit: process.env.RENDER_GIT_COMMIT || process.env.VERCEL_GIT_COMMIT_SHA || 'local-build',
+      environment: config.NODE_ENV,
+      features: {
+        roundSelection: true,
+        botCapacity: 5,
+        authoritativeReady: true,
+        turnTimer: 15
+      }
+    });
+  });
+
   // Vite development middleware or static production serving
   if (!config.isProduction) {
     const vite = await createViteServer({

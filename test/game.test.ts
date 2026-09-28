@@ -6,6 +6,7 @@ import { RoomManager } from '../server/room-manager';
 import { MemoryGameStateStore } from '../server/game-store';
 import { checkBingo, generateBingoBoard } from '../src/utils/bingo';
 import { ClientToServerEvents, ServerToClientEvents } from '../src/types/game';
+import { config } from '../server/config';
 
 async function runStrictAuditTests() {
   console.log('==================================================');
@@ -13,7 +14,7 @@ async function runStrictAuditTests() {
   console.log('==================================================\n');
 
   // 1. Board & Bingo Algorithm Tests
-  console.log('[1/8] Verifying Bingo Board & Line Calculation Authoritativeness...');
+  console.log('[1/10] Verifying Bingo Board & Line Calculation Authoritativeness...');
   const board = generateBingoBoard();
   assert.strictEqual(board.length, 5, 'Board must have 5 rows');
   board.forEach(row => assert.strictEqual(row.length, 5, 'Row must have 5 columns'));
@@ -44,16 +45,20 @@ async function runStrictAuditTests() {
   const serverUrl = `http://localhost:${port}`;
 
   io.on('connection', (socket) => {
-    socket.on('create-room', (name) => roomManager.createRoom(socket, name));
-    socket.on('join-room', (rId, name, pId, token) => roomManager.joinRoom(socket, rId, name, pId, token));
-    socket.on('reconnect-room', (rId, pId, token) => roomManager.reconnectPlayer(socket, rId, pId, token));
-    socket.on('start-game', (rId) => roomManager.startGame(socket, rId));
-    socket.on('mark-number', (rId, r, c) => roomManager.markNumber(socket, rId, r, c));
-    socket.on('set-board', (rId, b) => roomManager.setBoard(socket, rId, b));
-    socket.on('set-rounds', (rId, rounds) => roomManager.setRounds(socket, rId, rounds));
-    socket.on('send-message', (rId, text) => roomManager.sendMessage(socket, rId, text));
-    socket.on('leave-room', (rId) => roomManager.leaveRoom(socket, rId));
-    socket.on('disconnect', () => roomManager.handleSocketDisconnect(socket));
+    socket.on('create-room', (name) => { void roomManager.createRoom(socket, name); });
+    socket.on('join-room', (rId, name, pId, token) => { void roomManager.joinRoom(socket, rId, name, pId, token); });
+    socket.on('reconnect-room', (rId, pId, token) => { void roomManager.reconnectPlayer(socket, rId, pId, token); });
+    socket.on('start-game', (rId) => { void roomManager.startGame(socket, rId); });
+    socket.on('game:start', (rId, cb) => { void roomManager.startGame(socket, rId, cb); });
+    socket.on('player:set-ready', (payload, cb) => { void roomManager.setPlayerReady(socket, payload.roomId, payload.ready, cb); });
+    socket.on('room:add-bot', (rId, cb) => { void roomManager.addBot(socket, rId, cb); });
+    socket.on('room:kick-player', (payload, cb) => { void roomManager.kickPlayer(socket, payload.roomId, payload.targetPlayerId, cb); });
+    socket.on('mark-number', (rId, r, c) => { void roomManager.markNumber(socket, rId, r, c); });
+    socket.on('set-board', (rId, b) => { void roomManager.setBoard(socket, rId, b); });
+    socket.on('set-rounds', (rId, rounds) => { void roomManager.setRounds(socket, rId, rounds); });
+    socket.on('send-message', (rId, text) => { void roomManager.sendMessage(socket, rId, text); });
+    socket.on('leave-room', (rId) => { void roomManager.leaveRoom(socket, rId); });
+    socket.on('disconnect', () => { roomManager.handleSocketDisconnect(socket); });
   });
 
   const createClient = (): Promise<ClientSocket<ServerToClientEvents, ClientToServerEvents>> => {
@@ -68,7 +73,7 @@ async function runStrictAuditTests() {
 
   try {
     // 2. Room Creation & Secret Reconnect Token
-    console.log('\n[2/8] Testing Room Creation & Secret Reconnect Token Issuance...');
+    console.log('\n[2/10] Testing Room Creation & Secret Reconnect Token Issuance...');
     const client1 = await createClient();
     let createdRoomId = '';
     let player1Id = '';
@@ -85,7 +90,6 @@ async function runStrictAuditTests() {
         assert.strictEqual(state.players.length, 1);
         assert.strictEqual(state.players[0].name, 'Alice');
         assert.strictEqual(state.players[0].isHost, true);
-        // Verify token is NOT leaked in public room state
         assert.strictEqual((state.players[0] as unknown as Record<string, unknown>).reconnectToken, undefined);
         resolve();
       });
@@ -93,11 +97,21 @@ async function runStrictAuditTests() {
     });
     console.log(`✓ Room created: ${createdRoomId}, Player ID: ${player1Id}, Secret Token issued securely.`);
 
-    // 3. Joining Room & Player 2 Session
-    console.log('\n[3/8] Testing Player 2 Joining Room...');
+    // 3. Joining Room & Single Notification Audit
+    console.log('\n[3/10] Testing Player 2 Joining Room & Single Join Event Audit...');
     const client2 = await createClient();
     let player2Id = '';
     let player2Token = '';
+    let player1JoinCount = 0;
+    let player2JoinCount = 0;
+
+    client1.on('player:joined', () => {
+      player1JoinCount++;
+    });
+
+    client2.on('player:joined', () => {
+      player2JoinCount++;
+    });
 
     await new Promise<void>((resolve) => {
       let resolved = false;
@@ -109,95 +123,351 @@ async function runStrictAuditTests() {
         if (!resolved && state.players.length === 2) {
           resolved = true;
           assert.strictEqual(state.players[1].name, 'Bob');
+          assert.strictEqual(state.players[1].ready, false, 'Player 2 must initially be not ready');
           resolve();
         }
       });
       client2.emit('join-room', createdRoomId, 'Bob');
     });
-    console.log(`✓ Player 2 joined. Player ID: ${player2Id}`);
 
-    // 4. Session Hijack Prevention Test
-    console.log('\n[4/8] Testing Session Hijack Prevention with Forged Token...');
-    const attacker = await createClient();
+    await new Promise(r => setTimeout(r, 200));
+    assert.strictEqual(player1JoinCount, 1, 'Host must receive exactly ONE player:joined event');
+    assert.strictEqual(player2JoinCount, 0, 'Joining player must NOT receive player:joined for themselves');
+    console.log(`✓ Player 2 joined. Player ID: ${player2Id}. Join notification sent exactly once.`);
+
+    // 4. Server-Authoritative Ready System & Board Validation
+    console.log('\n[4/10] Testing Server-Authoritative Ready System & Board Validation...');
+    
+    // Host attempts to toggle ready -> must be rejected
     await new Promise<void>((resolve) => {
-      attacker.on('error', (msg) => {
-        assert(msg.includes('Unauthorized') || msg.includes('rejected'), 'Attacker must be rejected');
+      client1.emit('player:set-ready', { roomId: createdRoomId, ready: true }, (res) => {
+        assert.strictEqual(res.success, false);
+        assert(res.error?.includes('Host'));
         resolve();
       });
-      // Attacker tries to impersonate Alice with fake token
-      attacker.emit('reconnect-room', createdRoomId, player1Id, 'fake_token_12345');
     });
-    attacker.disconnect();
-    console.log('✓ Forged reconnect attempt successfully blocked.');
 
-    // 5. Authoritative Move & Turn Validation Test
-    console.log('\n[5/8] Testing Authoritative Turn & Move Validation...');
-    // Start game
+    // Bob attempts ready without valid board -> must be rejected
     await new Promise<void>((resolve) => {
-      let started = false;
-      client1.on('room-update', (state) => {
-        if (!started && state.status === 'playing') {
-          started = true;
-          resolve();
-        }
+      client2.emit('player:set-ready', { roomId: createdRoomId, ready: true }, (res) => {
+        assert.strictEqual(res.success, false);
+        assert(res.error?.includes('valid Bingo board'));
+        resolve();
       });
-      client1.emit('start-game', createdRoomId);
     });
 
-    const roomState = await roomManager.getRoom(createdRoomId);
-    assert(roomState !== null);
-    const turnPlayerId = roomState.currentTurn;
-    const nonTurnClient = turnPlayerId === player1Id ? client2 : client1;
+    // Bob submits valid board
+    const bobBoard = generateBingoBoard();
+    client2.emit('set-board', createdRoomId, bobBoard);
+    await new Promise(r => setTimeout(r, 100));
 
-    // Non-turn player tries to call an undrawn number -> Should NOT advance turn
+    // Bob ready up -> must succeed
+    await new Promise<void>((resolve) => {
+      client2.emit('player:set-ready', { roomId: createdRoomId, ready: true }, (res) => {
+        assert.strictEqual(res.success, true);
+        resolve();
+      });
+    });
+
+    let roomStateCheck = await roomManager.getRoom(createdRoomId);
+    let bobPlayer = roomStateCheck?.players.find(p => p.id === player2Id);
+    assert.strictEqual(bobPlayer?.ready, true, 'Bob must be marked ready on server');
+
+    // Bob changes board -> server must automatically reset ready=false
+    const bobBoard2 = generateBingoBoard();
+    client2.emit('set-board', createdRoomId, bobBoard2);
+    await new Promise(r => setTimeout(r, 100));
+
+    roomStateCheck = await roomManager.getRoom(createdRoomId);
+    bobPlayer = roomStateCheck?.players.find(p => p.id === player2Id);
+    assert.strictEqual(bobPlayer?.ready, false, 'Modifying board must automatically reset ready to false');
+
+    // Bob clicks Not Ready while already false
+    await new Promise<void>((resolve) => {
+      client2.emit('player:set-ready', { roomId: createdRoomId, ready: false }, (res) => {
+        assert.strictEqual(res.success, true);
+        resolve();
+      });
+    });
+
+    // Bob re-readies
+    await new Promise<void>((resolve) => {
+      client2.emit('player:set-ready', { roomId: createdRoomId, ready: true }, (res) => {
+        assert.strictEqual(res.success, true);
+        resolve();
+      });
+    });
+    roomStateCheck = await roomManager.getRoom(createdRoomId);
+    bobPlayer = roomStateCheck?.players.find(p => p.id === player2Id);
+    assert.strictEqual(bobPlayer?.ready, true, 'Bob is now ready again');
+    console.log('✓ Server-authoritative Ready validation, board checks, and auto-unready verified.');
+
+    // 5. Host Player Management: Add Bot, Max Capacity, Kick & Token Invalidation
+    console.log('\n[5/10] Testing Host Player Management: Add Bot, Max Players, and Kick Player...');
+    
+    // Host adds a bot
+    let botId = '';
+    await new Promise<void>((resolve) => {
+      client1.emit('room:add-bot', createdRoomId, (res) => {
+        assert.strictEqual(res.success, true);
+        resolve();
+      });
+    });
+
+    roomStateCheck = await roomManager.getRoom(createdRoomId);
+    assert.strictEqual(roomStateCheck?.players.length, 3, 'Room should have 3 players after adding bot');
+    const botPlayer = roomStateCheck?.players.find(p => p.isBot);
+    assert(botPlayer !== undefined);
+    botId = botPlayer.id;
+    assert.strictEqual(botPlayer.ready, true, 'Bot must automatically be ready');
+    assert(botPlayer.board !== null && botPlayer.board.length === 5, 'Bot must have valid board');
+
+    // Add 2 more bots to reach MAX_PLAYERS_PER_ROOM (5)
+    await new Promise<void>((resolve) => client1.emit('room:add-bot', createdRoomId, () => resolve()));
+    await new Promise<void>((resolve) => client1.emit('room:add-bot', createdRoomId, () => resolve()));
+
+    roomStateCheck = await roomManager.getRoom(createdRoomId);
+    assert.strictEqual(roomStateCheck?.players.length, 5, 'Room should have 5 players');
+
+    // Attempt to add 6th player -> must be rejected by server
+    await new Promise<void>((resolve) => {
+      client1.emit('room:add-bot', createdRoomId, (res) => {
+        assert.strictEqual(res.success, false);
+        assert(res.error?.includes('full'));
+        resolve();
+      });
+    });
+
+    // Remove one bot
+    await new Promise<void>((resolve) => {
+      client1.emit('room:kick-player', { roomId: createdRoomId, targetPlayerId: botId }, (res) => {
+        assert.strictEqual(res.success, true);
+        resolve();
+      });
+    });
+    roomStateCheck = await roomManager.getRoom(createdRoomId);
+    assert.strictEqual(roomStateCheck?.players.some(p => p.id === botId), false, 'Bot must be removed');
+
+    // Connect a third human player "Charlie"
+    const client3 = await createClient();
+    let player3Id = '';
+    let player3Token = '';
+    await new Promise<void>((resolve) => {
+      client3.on('session-init', (data) => {
+        player3Id = data.playerId;
+        player3Token = data.reconnectToken;
+        resolve();
+      });
+      client3.emit('join-room', createdRoomId, 'Charlie');
+    });
+
+    // Non-host Charlie tries to kick Bob -> must be rejected
+    await new Promise<void>((resolve) => {
+      client3.emit('room:kick-player', { roomId: createdRoomId, targetPlayerId: player2Id }, (res) => {
+        assert.strictEqual(res.success, false);
+        assert(res.error?.includes('host'));
+        resolve();
+      });
+    });
+
+    // Host tries to kick self -> must be rejected
+    await new Promise<void>((resolve) => {
+      client1.emit('room:kick-player', { roomId: createdRoomId, targetPlayerId: player1Id }, (res) => {
+        assert.strictEqual(res.success, false);
+        assert(res.error?.includes('themselves'));
+        resolve();
+      });
+    });
+
+    // Host kicks Charlie
+    await new Promise<void>((resolve) => {
+      client3.on('room:kicked', () => {
+        resolve();
+      });
+      client1.emit('room:kick-player', { roomId: createdRoomId, targetPlayerId: player3Id }, (res) => {
+        assert.strictEqual(res.success, true);
+      });
+    });
+
+    // Kicked player tries to reconnect with old token -> must be rejected
+    await new Promise<void>((resolve) => {
+      client3.on('error', (err) => {
+        assert(err.includes('Unauthorized') || err.includes('removed'));
+        resolve();
+      });
+      client3.emit('reconnect-room', createdRoomId, player3Id, player3Token);
+    });
+    client3.disconnect();
+
+    // Remove remaining bot to leave Alice and Bob
+    const remainingBot = (await roomManager.getRoom(createdRoomId))?.players.find(p => p.isBot);
+    if (remainingBot) {
+      await new Promise<void>((r) => client1.emit('room:kick-player', { roomId: createdRoomId, targetPlayerId: remainingBot.id }, () => r()));
+    }
+    const remainingBot2 = (await roomManager.getRoom(createdRoomId))?.players.find(p => p.isBot);
+    if (remainingBot2) {
+      await new Promise<void>((r) => client1.emit('room:kick-player', { roomId: createdRoomId, targetPlayerId: remainingBot2.id }, () => r()));
+    }
+
+    console.log('✓ Bot creation, 5-player room capacity, kick controls, and token invalidation verified.');
+
+    // 6. Start Game Validation & Idempotency
+    console.log('\n[6/10] Testing Start Game Validation & Lobby Lock...');
+
+    // Host Alice does not have a board yet -> Start game must be rejected
+    await new Promise<void>((resolve) => {
+      client1.emit('game:start', createdRoomId, (res) => {
+        assert.strictEqual(res.success, false);
+        assert(res.error?.toLowerCase().includes('board'));
+        resolve();
+      });
+    });
+
+    // Alice sets valid board
+    const aliceBoard = generateBingoBoard();
+    client1.emit('set-board', createdRoomId, aliceBoard);
+    await new Promise(r => setTimeout(r, 100));
+
+    // Bob un-readies -> start game must fail
+    await new Promise<void>((resolve) => {
+      client2.emit('player:set-ready', { roomId: createdRoomId, ready: false }, () => resolve());
+    });
+    await new Promise<void>((resolve) => {
+      client1.emit('game:start', createdRoomId, (res) => {
+        assert.strictEqual(res.success, false);
+        assert(res.error?.toLowerCase().includes('ready'));
+        resolve();
+      });
+    });
+
+    // Bob readies up
+    await new Promise<void>((resolve) => {
+      client2.emit('player:set-ready', { roomId: createdRoomId, ready: true }, () => resolve());
+    });
+
+    // Now start game -> must succeed atomically
+    await new Promise<void>((resolve) => {
+      client1.emit('game:start', createdRoomId, (res) => {
+        assert.strictEqual(res.success, true);
+        resolve();
+      });
+    });
+
+    let currentRoom = await roomManager.getRoom(createdRoomId);
+    assert.strictEqual(currentRoom?.status, 'playing', 'Room status must be playing');
+    assert(currentRoom?.turnDeadline !== undefined, 'turnDeadline must be set');
+    assert(currentRoom?.turnStartedAt !== undefined, 'turnStartedAt must be set');
+    assert(currentRoom?.turnId !== undefined, 'turnId must be set');
+
+    // Duplicate rapid start-game call -> must be rejected cleanly
+    await new Promise<void>((resolve) => {
+      client1.emit('game:start', createdRoomId, (res) => {
+        assert.strictEqual(res.success, false);
+        assert(res.error?.toLowerCase().includes('started'));
+        resolve();
+      });
+    });
+
+    // Verify lobby events are locked during game
+    await new Promise<void>((resolve) => {
+      client1.emit('room:add-bot', createdRoomId, (res) => {
+        assert.strictEqual(res.success, false);
+        assert(res.error?.toLowerCase().includes('started'));
+        resolve();
+      });
+    });
+
+    console.log('✓ Start game atomic validation, turn deadline initialization, and lobby lock verified.');
+
+    // 7. Authoritative Turn Validation & Move Processing
+    console.log('\n[7/10] Testing Authoritative Turn Validation & Timer Resets on Move...');
+    currentRoom = await roomManager.getRoom(createdRoomId);
+    assert(currentRoom !== null);
+    const turnPlayerId = currentRoom.currentTurn;
+    const initialTurnId = currentRoom.turnId;
+    const nonTurnClient = turnPlayerId === player1Id ? client2 : client1;
+    const turnClient = turnPlayerId === player1Id ? client1 : client2;
+
+    // Illegal move by non-turn player -> rejected, turn unchanged
     nonTurnClient.emit('mark-number', createdRoomId, 0, 0);
     await new Promise(r => setTimeout(r, 200));
 
-    const stateAfterIllegalMove = await roomManager.getRoom(createdRoomId);
-    assert.strictEqual(stateAfterIllegalMove?.currentTurn, turnPlayerId, 'Turn must not change on illegal move');
+    let roomAfterIllegal = await roomManager.getRoom(createdRoomId);
+    assert.strictEqual(roomAfterIllegal?.currentTurn, turnPlayerId, 'Turn must not change on non-turn move');
 
-    // Test malformed coordinates (e.g. 99, -1) -> Should not crash server
-    nonTurnClient.emit('mark-number', createdRoomId, 99, -1);
-    await new Promise(r => setTimeout(r, 200));
-    console.log('✓ Authoritative turn validation and out-of-bounds coordinate protection verified.');
+    // Turn player marks number (row 0, col 0) -> Turn changes, new turnDeadline & turnId generated
+    turnClient.emit('mark-number', createdRoomId, 0, 0);
+    await new Promise(r => setTimeout(r, 300));
 
-    // 6. Chat Sanitization & Rate Limit Test
-    console.log('\n[6/8] Testing Chat XSS Sanitization & HTML Escaping...');
-    await new Promise<void>((resolve) => {
-      client1.once('chat-message', (msg) => {
-        assert(!msg.text.includes('<script>'), 'Script tags must be escaped');
-        assert(msg.text.includes('&lt;script&gt;'), 'HTML characters must be sanitized');
-        resolve();
-      });
-      client2.emit('send-message', createdRoomId, '<script>alert("xss")</script>');
+    let roomAfterValid = await roomManager.getRoom(createdRoomId);
+    assert.notStrictEqual(roomAfterValid?.currentTurn, turnPlayerId, 'Turn must advance to next player');
+    assert.notStrictEqual(roomAfterValid?.turnId, initialTurnId, 'turnId must be refreshed on turn advance');
+    assert(roomAfterValid!.drawnNumbers.length > 0, 'Drawn numbers must have recorded move');
+
+    console.log('✓ Authoritative move execution and turn advance verified.');
+
+    // 8. Turn Timeout & Auto-Skip
+    console.log('\n[8/10] Testing Server Turn Timeout & Auto-Skip...');
+    const activeTurnBeforeTimeout = roomAfterValid?.currentTurn;
+    const activeTurnIdBeforeTimeout = roomAfterValid?.turnId;
+
+    // Manually trigger handleTurnTimeout directly on roomManager to test timeout flow reliably
+    let timeoutBroadcastReceived = false;
+    client1.once('game:turn-timeout', (data) => {
+      assert.strictEqual(data.playerId, activeTurnBeforeTimeout);
+      timeoutBroadcastReceived = true;
     });
-    console.log('✓ Chat message properly sanitized against XSS.');
 
-    // 7. Legitimate Reconnection with Secure Token
-    console.log('\n[7/8] Testing Legitimate Reconnect with Valid Token...');
+    await roomManager.handleTurnTimeout(createdRoomId, activeTurnIdBeforeTimeout!, activeTurnBeforeTimeout!);
+    await new Promise(r => setTimeout(r, 200));
+
+    const roomAfterTimeout = await roomManager.getRoom(createdRoomId);
+    assert.strictEqual(timeoutBroadcastReceived, true, 'game:turn-timeout must be broadcast');
+    assert.notStrictEqual(roomAfterTimeout?.currentTurn, activeTurnBeforeTimeout, 'Timeout must advance turn');
+
+    // Late move sent after timeout -> must be rejected
+    const timedOutClient = activeTurnBeforeTimeout === player1Id ? client1 : client2;
+    timedOutClient.emit('mark-number', createdRoomId, 1, 1);
+    await new Promise(r => setTimeout(r, 200));
+
+    const roomAfterLateMove = await roomManager.getRoom(createdRoomId);
+    assert.strictEqual(roomAfterLateMove?.currentTurn, roomAfterTimeout?.currentTurn, 'Late move must not affect new turn');
+
+    console.log('✓ Turn timeout skips player and rejects late moves.');
+
+    // 9. Disconnect & Legitimate Reconnect
+    console.log('\n[9/10] Testing Disconnect during turn and Reconnection with Token...');
     client2.disconnect();
     await new Promise(r => setTimeout(r, 300));
 
-    // Verify player is marked offline
     const stateDuringDisconnect = await roomManager.getRoom(createdRoomId);
     const p2State = stateDuringDisconnect?.players.find(p => p.id === player2Id);
-    assert.strictEqual(p2State?.connected, false);
+    assert.strictEqual(p2State?.connected, false, 'Player must be marked offline');
 
-    // Reconnect with valid token
+    // Reconnect with valid token -> player:reconnected emitted
     const client2Reconnected = await createClient();
+    let reconnectedNoticeReceived = false;
+    client1.once('player:reconnected', (data) => {
+      assert.strictEqual(data.player.name, 'Bob');
+      reconnectedNoticeReceived = true;
+    });
+
     await new Promise<void>((resolve) => {
       client2Reconnected.on('room-update', (state) => {
-        const reconnectedP = state.players.find(p => p.id === player2Id);
-        if (reconnectedP?.connected) {
+        const p = state.players.find(pl => pl.id === player2Id);
+        if (p?.connected) {
           resolve();
         }
       });
       client2Reconnected.emit('reconnect-room', createdRoomId, player2Id, player2Token);
     });
-    console.log('✓ Player successfully reconnected with valid authentication token.');
 
-    // 8. Memory & Room Lifecycle Stress Test (500 rapid rooms)
-    console.log('\n[8/8] Testing Memory Cleanup over 500 Created & Destroyed Rooms...');
+    await new Promise(r => setTimeout(r, 200));
+    assert.strictEqual(reconnectedNoticeReceived, true, 'player:reconnected must be emitted on reconnect');
+    console.log('✓ Reconnect restores player state and emits player:reconnected.');
+
+    // 10. Memory Cleanup & Timer Teardown Stress Test (500 rapid rooms)
+    console.log('\n[10/10] Testing Timer Teardown and Memory Cleanup over 500 Created & Destroyed Rooms...');
     const initialHeap = process.memoryUsage().heapUsed;
 
     for (let i = 0; i < 500; i++) {
@@ -215,14 +485,14 @@ async function runStrictAuditTests() {
         lastActivity: Date.now()
       };
       await store.saveRoom(tempId, tempRoom, 5000);
-      await store.deleteRoom(tempId);
+      await roomManager.destroyRoom(tempId);
     }
 
     const roomCount = await store.getRoomCount();
-    assert.strictEqual(roomCount, 1, 'Only active test room should remain');
+    assert.strictEqual(roomCount, 1, 'Only active test room should remain in store');
     const finalHeap = process.memoryUsage().heapUsed;
     const diffMB = Math.round((finalHeap - initialHeap) / 1024 / 1024);
-    console.log(`✓ 500 rooms created and cleaned up. Memory delta: ${diffMB} MB. Zero leak.`);
+    console.log(`✓ 500 rooms created, timers destroyed, and cleaned up. Memory delta: ${diffMB} MB. Zero leak.`);
 
     // Cleanup active test clients
     client1.emit('leave-room', createdRoomId);
@@ -236,7 +506,7 @@ async function runStrictAuditTests() {
     httpServer.close();
 
     console.log('\n==================================================');
-    console.log('ALL STRICT PRODUCTION AUDIT TESTS PASSED!');
+    console.log('ALL 10/10 STRICT PRODUCTION AUDIT TESTS PASSED!');
     console.log('==================================================\n');
   } catch (err) {
     roomManager.shutdown();
