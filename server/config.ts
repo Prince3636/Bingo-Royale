@@ -47,6 +47,6 @@ export const config = {
   // Network / Socket limits
   MAX_HTTP_PAYLOAD_BYTES: 20 * 1024, // 20KB
   MAX_SOCKET_PAYLOAD_BYTES: 50 * 1024, // 50KB
-  SOCKET_PING_TIMEOUT: parseInt(process.env.SOCKET_PING_TIMEOUT || '20000', 10),
+  SOCKET_PING_TIMEOUT: parseInt(process.env.SOCKET_PING_TIMEOUT || '60000', 10),
   SOCKET_PING_INTERVAL: parseInt(process.env.SOCKET_PING_INTERVAL || '25000', 10)
 };

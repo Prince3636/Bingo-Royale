@@ -1,4 +1,5 @@
 export type GameStatus = 'waiting' | 'playing' | 'finished';
+export type ConnectionStatus = 'connected' | 'connecting' | 'reconnecting' | 'disconnected';
 
 export interface Player {
   id: string; // Public persistent player ID

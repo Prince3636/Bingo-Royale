@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useGame } from '../contexts/GameContext';
-import { Trophy, Plus, LogIn, Users, Sparkles, ArrowLeft, Gamepad2, Wifi, WifiOff } from 'lucide-react';
+import { Trophy, Plus, LogIn, Users, Sparkles, ArrowLeft, Gamepad2, Wifi, WifiOff, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { sound } from '../utils/sound';
 
@@ -91,14 +91,23 @@ export const AuthPage: React.FC = () => {
           </span>
         </div>
 
-        {/* Error Alert Box */}
+        {/* Error Alert Box with Dismiss Button */}
         {error && (
           <motion.div 
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
-            className="mb-5 p-3 rounded-lg bg-red-500/10 border-2 border-red-500/40 text-red-600 dark:text-red-400 text-xs font-mono font-bold"
+            exit={{ opacity: 0, height: 0 }}
+            className="mb-5 p-3 rounded-xl bg-red-500/10 border-2 border-red-500/40 text-red-600 dark:text-red-400 text-xs font-mono font-bold flex items-center justify-between gap-2"
           >
-            ⚠️ {error}
+            <span className="flex-1 leading-snug">⚠️ {error}</span>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              className="p-1 rounded-md hover:bg-red-500/20 text-red-600 dark:text-red-400 transition-colors shrink-0"
+              aria-label="Dismiss error"
+            >
+              <X size={15} />
+            </button>
           </motion.div>
         )}
 

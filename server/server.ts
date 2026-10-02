@@ -29,15 +29,37 @@ async function startServer() {
     .map(s => s.trim())
     .filter(Boolean);
 
+  // Allowed Capacitor native app origins
+  const CAPACITOR_ORIGINS = new Set([
+    'https://localhost',
+    'capacitor://localhost',
+    'http://localhost'
+  ]);
+
   const corsValidator = (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     // Allow non-browser requests (e.g. mobile app, curl, healthcheck probes)
     if (!origin) return callback(null, true);
 
+    // Allow Capacitor mobile app WebViews
+    if (CAPACITOR_ORIGINS.has(origin)) {
+      return callback(null, true);
+    }
+
+    // Allow wildcard or empty configuration in production
+    if (config.CLIENT_URL === '*' || parsedOrigins.includes('*') || parsedOrigins.length === 0) {
+      return callback(null, true);
+    }
+
     // Development mode allows localhost
     if (!config.isProduction) {
-      if (origin.includes('localhost') || origin.includes('127.0.0.1') || config.CLIENT_URL === '*') {
+      if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
         return callback(null, true);
       }
+    }
+
+    // Allow Render and Vercel cloud hosting domains by default
+    if (origin.endsWith('.onrender.com') || origin.endsWith('.vercel.app')) {
+      return callback(null, true);
     }
 
     // Strict production check against allowed origins

@@ -1,11 +1,14 @@
 // Lightweight Web Audio API synthesizer for zero-dependency retro-arcade game SFX
+// Paired with Capacitor Haptics for tactile physical feedback on Android mobile devices
+import { triggerHaptic, triggerSuccessHaptic } from './mobile';
+import { fastCache } from './cache';
 
 class SoundManager {
   private ctx: AudioContext | null = null;
   private isMuted: boolean = false;
 
   constructor() {
-    this.isMuted = localStorage.getItem('bingo_sfx_muted') === 'true';
+    this.isMuted = fastCache.get<boolean>('bingo_sfx_muted', false) ?? false;
   }
 
   private initContext() {
@@ -26,12 +29,13 @@ class SoundManager {
 
   public toggleMute(): boolean {
     this.isMuted = !this.isMuted;
-    localStorage.setItem('bingo_sfx_muted', String(this.isMuted));
+    fastCache.set('bingo_sfx_muted', this.isMuted);
     return this.isMuted;
   }
 
-  // Quick tactile pop when selecting a cell
+  // Quick tactile pop when selecting a cell (with physical haptic impact)
   public playPop() {
+    triggerHaptic('light');
     if (this.isMuted) return;
     try {
       this.initContext();
@@ -60,6 +64,7 @@ class SoundManager {
 
   // Pleasant chime when a number is drawn
   public playDraw() {
+    triggerHaptic('light');
     if (this.isMuted) return;
     try {
       this.initContext();
@@ -89,6 +94,7 @@ class SoundManager {
 
   // Attention-grabbing chime when it's your turn
   public playYourTurn() {
+    triggerHaptic('medium');
     if (this.isMuted) return;
     try {
       this.initContext();
@@ -116,8 +122,9 @@ class SoundManager {
     }
   }
 
-  // Triumphant BINGO fanfare
+  // Triumphant BINGO fanfare with victory haptics
   public playVictory() {
+    triggerSuccessHaptic();
     if (this.isMuted) return;
     try {
       this.initContext();

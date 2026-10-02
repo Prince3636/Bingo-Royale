@@ -169,20 +169,22 @@ export const LobbyPage: React.FC = () => {
         </p>
         <div className="flex gap-2">
           <button 
+            type="button"
             onClick={() => toast.dismiss(t.id)} 
-            className="flex-1 py-2.5 px-3 rounded-lg border-2 border-fg-base font-bold uppercase text-xs hover:bg-black/5 dark:hover:bg-white/5"
+            className="flex-1 py-2.5 px-3 rounded-lg border-2 border-fg-base font-bold uppercase text-xs hover:bg-black/5 dark:hover:bg-white/5 active:scale-95"
           >
             Stay
           </button>
           <button 
+            type="button"
             onClick={() => { toast.dismiss(t.id); leaveRoom(); }} 
-            className="flex-1 py-2.5 px-3 rounded-lg bg-arcade-crimson text-white border-2 border-fg-base font-bold uppercase text-xs hover:opacity-90"
+            className="flex-1 py-2.5 px-3 rounded-lg bg-arcade-crimson text-white border-2 border-fg-base font-bold uppercase text-xs hover:opacity-90 active:scale-95"
           >
             Leave
           </button>
         </div>
       </div>
-    ), { duration: 15000 });
+    ), { id: 'confirm-exit', duration: 10000 });
   };
 
   const handleSendChat = (e: React.FormEvent) => {
