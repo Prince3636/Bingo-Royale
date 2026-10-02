@@ -123,7 +123,7 @@ public class BingoLocalServerPlugin extends Plugin {
             call.resolve(ret);
             Log.i(TAG, "Local server started on 0.0.0.0:" + port + ", IP: " + localIp);
         } catch (Exception e) {
-            Log.error(TAG, "Failed to start local server", e);
+            Log.e(TAG, "Failed to start local server", e);
             call.reject("Failed to start local server: " + e.getMessage());
         }
     }
