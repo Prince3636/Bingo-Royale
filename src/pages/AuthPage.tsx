@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { sound } from '../utils/sound';
 
 export const AuthPage: React.FC = () => {
-  const { playerName, setPlayerName, createRoom, joinRoom, error, setError, connectionStatus } = useGame();
+  const { playerName, setPlayerName, createRoom, joinRoom, error, setError, connectionStatus, setGameMode } = useGame();
   const [roomId, setRoomId] = useState('');
   const [mode, setMode] = useState<'initial' | 'create' | 'join'>('initial');
 
@@ -134,6 +134,15 @@ export const AuthPage: React.FC = () => {
               >
                 <LogIn size={22} className="text-arcade-amber" />
                 <span>Join with Code</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => { sound.playPop(); setGameMode(null); }}
+                className="w-full py-2.5 px-4 rounded-xl border-2 border-card-border hover:border-fg-base text-xs font-mono font-bold uppercase tracking-wider text-fg-base opacity-75 hover:opacity-100 flex items-center justify-center gap-2 transition-all active:scale-98"
+              >
+                <ArrowLeft size={14} />
+                <span>Change Game Mode</span>
               </button>
 
               <div className="pt-2 flex items-center justify-center gap-4 text-[11px] font-mono opacity-60 text-center">

@@ -1,9 +1,18 @@
 import React, { createContext, useContext, useEffect, useState, useRef, ReactNode } from 'react';
-import { io, Socket } from 'socket.io-client';
+import { Socket } from 'socket.io-client';
 import { GameState, ChatMessage, ServerToClientEvents, ClientToServerEvents, ConnectionStatus } from '../types/game';
 import toast from 'react-hot-toast';
 import { fastCache } from '../utils/cache';
 import { isNative, onNetworkChange, onAppStateChange } from '../utils/mobile';
+import {
+  IGameTransport,
+  OnlineSocketTransport,
+  LocalHostTransport,
+  LocalClientTransport,
+  TransportEvents
+} from '../utils/gameTransport';
+
+export type GameMode = 'online' | 'local' | null;
 
 interface GameContextType {
   socket: Socket<ServerToClientEvents, ClientToServerEvents> | null;
@@ -15,6 +24,10 @@ interface GameContextType {
   connectionStatus: ConnectionStatus;
   isBackendMissing: boolean;
   serverUrl: string;
+  gameMode: GameMode;
+  setGameMode: (mode: GameMode) => void;
+  startLocalHost: (hostName: string) => void;
+  joinLocalGame: (hostIp: string, playerName: string, roomCode?: string) => void;
   setCustomServerUrl: (url: string) => void;
   setPlayerName: (name: string) => void;
   createRoom: (name: string) => void;
@@ -42,11 +55,12 @@ const STORAGE_KEYS = {
   RECONNECT_TOKEN: 'bingo_reconnect_token',
   PLAYER_NAME: 'bingo_player_name',
   ROOM_ID: 'bingo_room_id',
-  SERVER_URL: 'bingo_custom_server_url'
+  SERVER_URL: 'bingo_custom_server_url',
+  GAME_MODE: 'bingo_game_mode'
 };
 
 export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [socket, setSocket] = useState<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
+  const [gameMode, setGameModeState] = useState<GameMode>(null);
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [error, setErrorState] = useState<string | null>(null);
@@ -72,7 +86,7 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [playerId, setPlayerId] = useState<string | null>(() => {
     return fastCache.get<string>(STORAGE_KEYS.PLAYER_ID) || sessionStorage.getItem(STORAGE_KEYS.PLAYER_ID) || null;
   });
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting');
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connected');
 
   // Smart Server URL resolution
   const [currentServerUrl, setCurrentServerUrl] = useState<string>(() => {
@@ -80,7 +94,6 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (cached) return cached;
     if (import.meta.env.VITE_SERVER_URL) return import.meta.env.VITE_SERVER_URL;
     if (isNative) {
-      // In native Android APK, default fallback if none provided
       return 'https://bingo-royale.onrender.com';
     }
     return window.location.origin;
@@ -93,7 +106,8 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     !isNative
   );
 
-  const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
+  const transportRef = useRef<IGameTransport | null>(null);
+  const [socketInstance, setSocketInstance] = useState<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
 
   const setPlayerName = (name: string) => {
     setPlayerNameState(name);
@@ -107,57 +121,32 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setCurrentServerUrl(clean);
   };
 
-  useEffect(() => {
-    const serverUrl = currentServerUrl;
-
-    if (isBackendMissing) {
-      console.warn(
-        '[DEPLOYMENT WARNING] VITE_SERVER_URL is missing or set to localhost in production build!'
-      );
+  const setGameMode = (mode: GameMode) => {
+    if (transportRef.current) {
+      transportRef.current.disconnect();
+      transportRef.current = null;
     }
+    setSocketInstance(null);
+    setGameState(null);
+    setMessages([]);
+    setError(null);
+    setGameModeState(mode);
+  };
 
-    const newSocket = io(serverUrl, {
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: 50,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      timeout: 30000,
-      autoConnect: true
-    });
-
-    socketRef.current = newSocket;
-    setSocket(newSocket);
-
-    newSocket.on('connect', () => {
-      setConnectionStatus('connected');
+  // Reusable event callbacks for any active transport (Online or Local)
+  const createTransportEvents = (): TransportEvents => ({
+    onRoomUpdate: (state) => {
+      setGameState(state);
       setError(null);
-
-      // Auto-reconnect using saved credentials from fast cache
-      const savedRoomId = fastCache.get<string>(STORAGE_KEYS.ROOM_ID) || sessionStorage.getItem(STORAGE_KEYS.ROOM_ID);
-      const savedPlayerId = fastCache.get<string>(STORAGE_KEYS.PLAYER_ID) || sessionStorage.getItem(STORAGE_KEYS.PLAYER_ID);
-      const savedToken = fastCache.get<string>(STORAGE_KEYS.RECONNECT_TOKEN) || sessionStorage.getItem(STORAGE_KEYS.RECONNECT_TOKEN);
-
-      if (savedRoomId && savedPlayerId && savedToken) {
-        console.log(`Re-authenticating session to room ${savedRoomId}`);
-        newSocket.emit('reconnect-room', savedRoomId, savedPlayerId, savedToken);
+      if (state.roomId) {
+        fastCache.set(STORAGE_KEYS.ROOM_ID, state.roomId);
+        sessionStorage.setItem(STORAGE_KEYS.ROOM_ID, state.roomId);
       }
-    });
-
-    newSocket.on('connect_error', (err) => {
-      setConnectionStatus('connecting');
-      setError(`Server connection error: ${err.message}`);
-    });
-
-    newSocket.on('reconnect_attempt', () => {
-      setConnectionStatus('reconnecting');
-    });
-
-    newSocket.on('disconnect', () => {
-      setConnectionStatus('disconnected');
-    });
-
-    newSocket.on('session-init', (data) => {
+    },
+    onChatMessage: (msg) => {
+      setMessages((prev) => [...prev.slice(-99), msg]);
+    },
+    onSessionInit: (data) => {
       setPlayerId(data.playerId);
       fastCache.set(STORAGE_KEYS.PLAYER_ID, data.playerId);
       fastCache.set(STORAGE_KEYS.RECONNECT_TOKEN, data.reconnectToken);
@@ -168,31 +157,15 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         fastCache.set(STORAGE_KEYS.ROOM_ID, data.roomId);
         sessionStorage.setItem(STORAGE_KEYS.ROOM_ID, data.roomId);
       }
-    });
-
-    newSocket.on('room-update', (state) => {
-      setGameState(state);
-      setError(null);
-      if (state.roomId) {
-        fastCache.set(STORAGE_KEYS.ROOM_ID, state.roomId);
-        sessionStorage.setItem(STORAGE_KEYS.ROOM_ID, state.roomId);
-      }
-    });
-
-    newSocket.on('chat-message', (msg) => {
-      setMessages((prev) => [...prev.slice(-99), msg]);
-    });
-
-    newSocket.on('player:joined', (data) => {
+    },
+    onPlayerJoined: (data) => {
       toast.success(`${data.player.name} joined the room!`, { id: `joined-${data.player.id}` });
-    });
-
-    newSocket.on('player:reconnected', (data) => {
+    },
+    onPlayerReconnected: (data) => {
       toast.success(`${data.player.name} reconnected`, { id: `reconnected-${data.player.id}` });
-    });
-
-    newSocket.on('room:kicked', (data) => {
-      toast.error(data.reason || 'You were removed from the room by the host.', { id: 'kicked-alert', duration: 6000 });
+    },
+    onRoomKicked: (data) => {
+      toast.error(data.reason || 'You were removed from the room by the host.', { id: 'kicked-alert', duration: 5000 });
       fastCache.remove(STORAGE_KEYS.ROOM_ID);
       fastCache.remove(STORAGE_KEYS.PLAYER_ID);
       fastCache.remove(STORAGE_KEYS.RECONNECT_TOKEN);
@@ -202,45 +175,92 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setPlayerId(null);
       setGameState(null);
       setMessages([]);
-    });
-
-    newSocket.on('game:turn-timeout', (data) => {
+    },
+    onTurnTimeout: (data) => {
       toast(`${data.name}'s turn timed out!`, { icon: '⏰', id: 'turn-timeout', duration: 2500 });
-    });
-
-    newSocket.on('error', (msg) => {
+    },
+    onError: (msg) => {
       setError(msg);
       toast.error(msg, { id: 'game-error', duration: 4000 });
-    });
+    },
+    onConnectionChange: (status) => {
+      setConnectionStatus(status);
+    }
+  });
 
-    // Mobile network listener to auto-reconnect when device comes back online
-    const cleanupNetwork = onNetworkChange(({ connected }) => {
-      if (connected) {
-        if (!newSocket.connected) {
-          setConnectionStatus('reconnecting');
-          newSocket.connect();
-        }
-      } else {
-        setConnectionStatus('disconnected');
-        toast.error('No internet connection. Waiting for network...', { id: 'network-offline' });
+  // Connect Online transport ONLY when in Online mode
+  useEffect(() => {
+    if (gameMode !== 'online') return;
+
+    const events = createTransportEvents();
+    const onlineTransport = new OnlineSocketTransport(currentServerUrl, events);
+    transportRef.current = onlineTransport;
+
+    onlineTransport.connect().then(() => {
+      setSocketInstance(onlineTransport.getSocket());
+
+      // Auto-reconnect online if room credentials cached
+      const savedRoomId = fastCache.get<string>(STORAGE_KEYS.ROOM_ID) || sessionStorage.getItem(STORAGE_KEYS.ROOM_ID);
+      const savedPlayerId = fastCache.get<string>(STORAGE_KEYS.PLAYER_ID) || sessionStorage.getItem(STORAGE_KEYS.PLAYER_ID);
+      const savedToken = fastCache.get<string>(STORAGE_KEYS.RECONNECT_TOKEN) || sessionStorage.getItem(STORAGE_KEYS.RECONNECT_TOKEN);
+
+      if (savedRoomId && savedPlayerId && savedToken) {
+        onlineTransport.reconnectRoom(savedRoomId, savedPlayerId, savedToken);
       }
     });
 
-    // Mobile app lifecycle listener: auto-reconnect when app returns from background or unlock
+    const cleanupNetwork = onNetworkChange(({ connected }) => {
+      if (!connected) {
+        setConnectionStatus('disconnected');
+        toast.error('No network connection.', { id: 'network-offline' });
+      }
+    });
+
     const cleanupAppState = onAppStateChange((isActive) => {
-      if (isActive && !newSocket.connected) {
-        setConnectionStatus('reconnecting');
-        newSocket.connect();
+      if (isActive && gameMode === 'online') {
+        const sock = onlineTransport.getSocket();
+        if (sock && !sock.connected) {
+          sock.connect();
+        }
       }
     });
 
     return () => {
       cleanupNetwork();
       cleanupAppState();
-      newSocket.disconnect();
-      socketRef.current = null;
+      onlineTransport.disconnect();
+      transportRef.current = null;
+      setSocketInstance(null);
     };
-  }, [currentServerUrl, isBackendMissing]);
+  }, [gameMode, currentServerUrl]);
+
+  // Start Local Host
+  const startLocalHost = async (hostName: string) => {
+    if (transportRef.current) {
+      transportRef.current.disconnect();
+    }
+
+    const events = createTransportEvents();
+    const hostTransport = new LocalHostTransport(events);
+    transportRef.current = hostTransport;
+
+    await hostTransport.connect();
+    hostTransport.createRoom(hostName);
+  };
+
+  // Join Local Game via IP
+  const joinLocalGame = async (hostIp: string, name: string, roomCode?: string) => {
+    if (transportRef.current) {
+      transportRef.current.disconnect();
+    }
+
+    const events = createTransportEvents();
+    const clientTransport = new LocalClientTransport(hostIp, 8765, events);
+    transportRef.current = clientTransport;
+
+    await clientTransport.connect();
+    clientTransport.joinRoom(roomCode || 'LOCAL1', name);
+  };
 
   const createRoom = (name: string) => {
     fastCache.remove(STORAGE_KEYS.ROOM_ID);
@@ -249,114 +269,51 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     sessionStorage.removeItem(STORAGE_KEYS.ROOM_ID);
     sessionStorage.removeItem(STORAGE_KEYS.PLAYER_ID);
     sessionStorage.removeItem(STORAGE_KEYS.RECONNECT_TOKEN);
-    socketRef.current?.emit('create-room', name);
+    transportRef.current?.createRoom(name);
   };
 
   const joinRoom = (roomId: string, name: string) => {
-    const cleanRoomId = roomId.trim().toUpperCase();
-    const savedRoomId = fastCache.get<string>(STORAGE_KEYS.ROOM_ID) || sessionStorage.getItem(STORAGE_KEYS.ROOM_ID);
-    const isSameRoom = savedRoomId === cleanRoomId;
-    
-    const savedPlayerId = isSameRoom ? (fastCache.get<string>(STORAGE_KEYS.PLAYER_ID) || sessionStorage.getItem(STORAGE_KEYS.PLAYER_ID) || undefined) : undefined;
-    const savedToken = isSameRoom ? (fastCache.get<string>(STORAGE_KEYS.RECONNECT_TOKEN) || sessionStorage.getItem(STORAGE_KEYS.RECONNECT_TOKEN) || undefined) : undefined;
-    socketRef.current?.emit('join-room', cleanRoomId, name, savedPlayerId, savedToken);
+    transportRef.current?.joinRoom(roomId, name);
   };
 
   const reconnectRoom = (roomId: string, reconnectId: string, token: string) => {
-    socketRef.current?.emit('reconnect-room', roomId, reconnectId, token);
+    transportRef.current?.reconnectRoom(roomId, reconnectId, token);
   };
 
   const setPlayerReady = (ready: boolean): Promise<{ success: boolean; error?: string }> => {
-    return new Promise((resolve) => {
-      if (!gameState || !socketRef.current) {
-        resolve({ success: false, error: 'Not connected to room' });
-        return;
-      }
-      socketRef.current.emit('player:set-ready', { roomId: gameState.roomId, ready }, (res) => {
-        if (!res?.success) {
-          toast.error(res?.error || 'Failed to update ready status', { id: 'ready-err' });
-          resolve({ success: false, error: res?.error });
-        } else {
-          resolve({ success: true });
-        }
-      });
-    });
+    if (!transportRef.current) return Promise.resolve({ success: false, error: 'Not connected' });
+    return transportRef.current.setPlayerReady(ready);
   };
 
   const startGame = (): Promise<{ success: boolean; error?: string }> => {
-    return new Promise((resolve) => {
-      if (!gameState || !socketRef.current) {
-        resolve({ success: false, error: 'Not connected to room' });
-        return;
-      }
-      socketRef.current.emit('start-game', gameState.roomId, (res) => {
-        if (!res?.success) {
-          toast.error(res?.error || 'Failed to start game', { id: 'start-err' });
-          resolve({ success: false, error: res?.error });
-        } else {
-          resolve({ success: true });
-        }
-      });
-    });
+    if (!transportRef.current) return Promise.resolve({ success: false, error: 'Not connected' });
+    return transportRef.current.startGame();
   };
 
   const setRounds = (rounds: number) => {
-    if (gameState) {
-      socketRef.current?.emit('set-rounds', gameState.roomId, rounds);
-    }
+    transportRef.current?.setRounds(rounds);
   };
 
   const markNumber = (r: number, c: number) => {
-    if (gameState) {
-      socketRef.current?.emit('mark-number', gameState.roomId, r, c);
-    }
+    transportRef.current?.markNumber(r, c);
   };
 
   const setBoard = (board: number[][]) => {
-    if (gameState) {
-      socketRef.current?.emit('set-board', gameState.roomId, board);
-    }
+    transportRef.current?.setBoard(board);
   };
 
   const sendMessage = (text: string) => {
-    if (gameState && text.trim()) {
-      socketRef.current?.emit('send-message', gameState.roomId, text.trim());
-    }
+    transportRef.current?.sendMessage(text);
   };
 
   const addBot = (): Promise<{ success: boolean; error?: string }> => {
-    return new Promise((resolve) => {
-      if (!gameState || !socketRef.current) {
-        resolve({ success: false, error: 'Not in room' });
-        return;
-      }
-      socketRef.current.emit('add-bot', gameState.roomId, (res) => {
-        if (!res?.success) {
-          toast.error(res?.error || 'Could not add bot', { id: 'bot-err' });
-          resolve({ success: false, error: res?.error });
-        } else {
-          toast.success('Bot player joined!', { id: 'bot-ok' });
-          resolve({ success: true });
-        }
-      });
-    });
+    if (!transportRef.current) return Promise.resolve({ success: false, error: 'Not connected' });
+    return transportRef.current.addBot();
   };
 
   const kickPlayer = (targetPlayerId: string): Promise<{ success: boolean; error?: string }> => {
-    return new Promise((resolve) => {
-      if (!gameState || !socketRef.current) {
-        resolve({ success: false, error: 'Not in room' });
-        return;
-      }
-      socketRef.current.emit('room:kick-player', { roomId: gameState.roomId, targetPlayerId }, (res) => {
-        if (!res?.success) {
-          toast.error(res?.error || 'Could not remove player', { id: 'kick-err' });
-          resolve({ success: false, error: res?.error });
-        } else {
-          resolve({ success: true });
-        }
-      });
-    });
+    if (!transportRef.current) return Promise.resolve({ success: false, error: 'Not connected' });
+    return transportRef.current.kickPlayer(targetPlayerId);
   };
 
   const removePlayer = (targetPlayerId: string) => {
@@ -364,19 +321,20 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const leaveRoom = () => {
-    if (gameState) {
-      socketRef.current?.emit('leave-room', gameState.roomId);
-      fastCache.remove(STORAGE_KEYS.ROOM_ID);
-      sessionStorage.removeItem(STORAGE_KEYS.ROOM_ID);
-      setGameState(null);
-      setMessages([]);
-    }
+    transportRef.current?.leaveRoom();
+    fastCache.remove(STORAGE_KEYS.ROOM_ID);
+    fastCache.remove(STORAGE_KEYS.PLAYER_ID);
+    fastCache.remove(STORAGE_KEYS.RECONNECT_TOKEN);
+    sessionStorage.removeItem(STORAGE_KEYS.ROOM_ID);
+    sessionStorage.removeItem(STORAGE_KEYS.PLAYER_ID);
+    sessionStorage.removeItem(STORAGE_KEYS.RECONNECT_TOKEN);
+    setPlayerId(null);
+    setGameState(null);
+    setMessages([]);
   };
 
   const resetRoom = () => {
-    if (gameState) {
-      socketRef.current?.emit('reset-room', gameState.roomId);
-    }
+    transportRef.current?.resetRoom();
   };
 
   const showNotification = (title: string, message: string, duration: number = 3500) => {
@@ -411,7 +369,7 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   return (
     <GameContext.Provider
       value={{
-        socket,
+        socket: socketInstance,
         gameState,
         messages,
         error,
@@ -420,6 +378,10 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         connectionStatus,
         isBackendMissing,
         serverUrl: currentServerUrl,
+        gameMode,
+        setGameMode,
+        startLocalHost,
+        joinLocalGame,
         setCustomServerUrl,
         setPlayerName,
         createRoom,
@@ -447,6 +409,8 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
 export const useGame = () => {
   const context = useContext(GameContext);
-  if (!context) throw new Error('useGame must be used within a GameProvider');
+  if (!context) {
+    throw new Error('useGame must be used within a GameProvider');
+  }
   return context;
 };

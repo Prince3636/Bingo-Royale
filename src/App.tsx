@@ -4,6 +4,8 @@ import { ThemeProvider, useTheme } from './contexts/ThemeContext';
 import { AuthPage } from './pages/AuthPage';
 import { LobbyPage } from './pages/LobbyPage';
 import { GamePage } from './pages/GamePage';
+import { ModeSelectionPage } from './pages/ModeSelectionPage';
+import { LocalLobbyPage } from './pages/LocalLobbyPage';
 import { Moon, Sun, Volume2, VolumeX, Server, X, AlertTriangle } from 'lucide-react';
 import { Toaster, toast } from 'react-hot-toast';
 import { sound } from './utils/sound';
@@ -133,13 +135,20 @@ export function QuickControls() {
 }
 
 function GameRouter() {
-  const { gameState, leaveRoom } = useGame();
+  const { gameState, leaveRoom, gameMode, setGameMode } = useGame();
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
 
   useEffect(() => {
     // Intercept Android hardware back button
     if (!gameState) {
-      setBackHandler(null);
+      if (gameMode) {
+        setBackHandler(() => {
+          setGameMode(null);
+          return true;
+        });
+      } else {
+        setBackHandler(null);
+      }
       return;
     }
 
@@ -157,7 +166,7 @@ function GameRouter() {
     return () => {
       setBackHandler(null);
     };
-  }, [gameState, showLeaveConfirm]);
+  }, [gameState, showLeaveConfirm, gameMode]);
 
   const handleConfirmLeave = () => {
     setShowLeaveConfirm(false);
@@ -168,7 +177,9 @@ function GameRouter() {
 
   return (
     <>
-      {!gameState && <AuthPage />}
+      {!gameMode && <ModeSelectionPage />}
+      {gameMode === 'online' && !gameState && <AuthPage />}
+      {gameMode === 'local' && !gameState && <LocalLobbyPage />}
       {gameState?.status === 'waiting' && <LobbyPage />}
       {gameState && gameState.status !== 'waiting' && <GamePage />}
 
@@ -214,20 +225,20 @@ function GameRouter() {
 }
 
 function ConnectionStatusBar() {
-  const { connectionStatus } = useGame();
-  if (connectionStatus === 'connected') return null;
+  const { connectionStatus, gameMode } = useGame();
+  if (connectionStatus === 'connected' || !gameMode) return null;
 
   return (
     <div className="fixed bottom-0 left-0 right-0 z-50 py-1.5 px-4 bg-arcade-amber text-black border-t-2 border-fg-base font-mono text-xs text-center font-bold uppercase flex items-center justify-center gap-2 shadow-lg backdrop-blur-md">
       <div className="w-2 h-2 rounded-full bg-arcade-crimson animate-ping" />
-      {connectionStatus === 'reconnecting' ? 'Network interrupted. Reconnecting to room...' : 'Connecting to game server...'}
+      {connectionStatus === 'reconnecting' ? 'Network interrupted. Reconnecting...' : 'Connecting to game...'}
     </div>
   );
 }
 
 function BackendMissingBanner() {
-  const { isBackendMissing } = useGame();
-  if (!isBackendMissing) return null;
+  const { isBackendMissing, gameMode } = useGame();
+  if (!isBackendMissing || gameMode !== 'online') return null;
 
   return (
     <div className="fixed top-0 left-0 right-0 z-50 py-2 px-4 bg-arcade-crimson text-white font-mono text-xs text-center font-bold uppercase shadow-lg">

@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "tsx test/game.test.ts",
+    "test": "tsx test/game.test.ts && tsx test/local-game.test.ts",
     "test:load": "tsx test/load-test.ts",
     "test:multi": "tsx test/multi-instance.test.ts",
     "start": "tsx server/server.ts",
