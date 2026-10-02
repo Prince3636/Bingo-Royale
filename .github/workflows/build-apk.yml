@@ -1,4 +1,4 @@
-name: Build Android APK & Play Store Bundle (AAB)
+name: Build Android Debug APK
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
 
 jobs:
   build-android:
-    name: Build Android APK & Play Store AAB
+    name: Build Android Testing APK
     runs-on: ubuntu-latest
 
     steps:
@@ -63,39 +63,15 @@ jobs:
       - name: Grant Execute Permission to gradlew
         run: chmod +x android/gradlew
 
-      - name: Decode Release Keystore (if secret provided)
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
-        run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/release.keystore
-          echo "KEYSTORE_PATH=$GITHUB_WORKSPACE/android/release.keystore" >> $GITHUB_ENV
-
-      - name: Build Debug APK (Ready for direct device installation & testing)
+      - name: Build Debug APK (assembleDebug)
         run: |
           cd android
           ./gradlew assembleDebug
 
-      - name: Build Play Store Release App Bundle (AAB)
-        env:
-          KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          cd android
-          ./gradlew bundleRelease
-
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Bingo-Royale-Debug-APK
+          name: bingo-royale-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
-
-      - name: Upload Play Store Release Bundle (AAB) Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Bingo-Royale-PlayStore-AAB
-          path: android/app/build/outputs/bundle/release/*.aab
-          if-no-files-found: error
-          retention-days: 30
