@@ -57,6 +57,13 @@ jobs:
           echo "Available Android Build Tools:"
           ls -la "$ANDROID_SDK_ROOT/build-tools" || true
 
+      - name: Setup Android SDK Platform 36 & Licenses
+        run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          mkdir -p "$ANDROID_HOME/licenses" || true
+          yes | sdkmanager --licenses || true
+          yes | sdkmanager "platforms;android-36" || true
+
       - name: Install NPM Dependencies
         run: npm ci
 
